@@ -966,7 +966,10 @@ with tab_dynamic:
                         if not SAMPLE_APK.exists():
                             _run_error = f"sample_app.apk not found at {SAMPLE_APK}"
                         else:
-                            _run_apk_path = str(SAMPLE_APK)
+                            # Use a project-relative path so the Windows ADB
+                            # executable (called via ~/bin/adb wrapper) can
+                            # resolve it from the subprocess working directory.
+                            _run_apk_path = str(SAMPLE_APK.relative_to(BASE_DIR))
                     else:
                         _uploaded_file = st.session_state.get("p5_uploader")
                         if _uploaded_file is None:
@@ -983,7 +986,10 @@ with tab_dynamic:
                             )
                             os.write(_fd, _uploaded_file.getvalue())
                             os.close(_fd)
-                            _run_apk_path = _temp_apk
+                            # Convert to project-relative path (same reason as
+                            # the sample APK above — ADB.exe cannot follow
+                            # /mnt/c/... Linux paths).
+                            _run_apk_path = str(Path(_temp_apk).relative_to(BASE_DIR))
 
                     if _run_error:
                         st.error(f"❌ {_run_error}")
@@ -992,11 +998,14 @@ with tab_dynamic:
                         # We call the existing CLI of phase5_live_capture.py with an
                         # extra --json-out flag that we will add to the script.
                         _script = str(BASE_DIR / "phase5_live_capture.py")
-                        _json_out = str(BASE_DIR / "_p5_last_result.json")
+                        # Use a relative path for --json-out too, so the
+                        # subprocess (cwd=BASE_DIR) creates it in the right place.
+                        _json_out_rel = "_p5_last_result.json"
+                        _json_out_abs = str(BASE_DIR / "_p5_last_result.json")
                         _cmd = [
                             sys.executable, _script,
                             "run", _run_apk_path, str(p5_seconds),
-                            "--json-out", _json_out,
+                            "--json-out", _json_out_rel,
                         ]
 
                         # Make ~/bin available so the adb wrapper is on PATH
@@ -1034,9 +1043,9 @@ with tab_dynamic:
                                 else:
                                     # Try to load structured JSON result
                                     _structured = None
-                                    if os.path.exists(_json_out):
+                                    if os.path.exists(_json_out_abs):
                                         try:
-                                            with open(_json_out) as _jf:
+                                            with open(_json_out_abs) as _jf:
                                                 _structured = json.load(_jf)
                                         except Exception as _je:
                                             st.warning(f"Could not parse JSON result file: {_je}")

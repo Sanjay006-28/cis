@@ -4,12 +4,26 @@ venv/
 env/
 .env
 
-# Python cache & checkpoints
+# Python cache & build artefacts
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+dist/
+build/
+
+# Jupyter
 .ipynb_checkpoints/
+
+# Streamlit cache
+.streamlit/
 
 # Temporary / OS files
 .DS_Store
 Thumbs.db
+
+# Phase 5 live-analysis runtime outputs
+# (generated each run; not source code)
+_p5_last_result.json
+strace_out.txt
+_p5upload_*.apk

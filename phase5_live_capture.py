@@ -188,8 +188,21 @@ def capture_syscalls(apk_path, seconds=60, uninstall=True, device=None, throttle
     if not strace:
         raise RuntimeError("strace was not found on the emulator. Run check_setup() and follow its instructions.")
 
+    # Normalize APK path for ADB so Windows adb.exe (common in WSL setups) can resolve it
+    install_path = apk_path
+    try:
+        rel = os.path.relpath(apk_path)
+        if not rel.startswith(".."):
+            install_path = rel
+        elif shutil.which("wslpath"):
+            wpath = subprocess.check_output(["wslpath", "-w", apk_path], text=True).strip()
+            if wpath:
+                install_path = wpath
+    except Exception:
+        pass
+
     say(f"[1/5] installing {pkg} ...")
-    code, out, err = adb("install", "-r", "-g", apk_path, timeout=180, device=device)
+    code, out, err = adb("install", "-r", "-g", install_path, timeout=180, device=device)
     if "Success" not in out:
         raise RuntimeError(f"Install failed: {(out + ' ' + err)[:300]}")
     procs = []
