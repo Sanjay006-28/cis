@@ -1,0 +1,15 @@
+# Virtual environment
+app_env/
+venv/
+env/
+.env
+
+# Python cache & checkpoints
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+
+# Temporary / OS files
+.DS_Store
+Thumbs.db

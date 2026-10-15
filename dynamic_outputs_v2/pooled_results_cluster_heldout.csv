@@ -1,0 +1,5 @@
+,Accuracy,Precision,Recall (malware caught),Specificity (benign cleared),F1,ROC-AUC
+TCN (Multi-Branch),0.8499,0.9631,0.8551,0.8219,0.9059,0.8939
+BiLSTM,0.7969,0.9554,0.7967,0.7979,0.8688,0.889
+Transformer,0.8615,0.9694,0.8632,0.852,0.9132,0.9371
+XGBoost,0.9199,0.9748,0.9292,0.8693,0.9514,0.9572

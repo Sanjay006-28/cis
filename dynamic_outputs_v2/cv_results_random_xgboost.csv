@@ -1,0 +1,2 @@
+,Accuracy,Precision,Recall (malware caught),Specificity (benign cleared),F1,ROC-AUC
+XGBoost (random 5-fold),0.9714 ± 0.0021,0.9837 ± 0.0017,0.9823 ± 0.0026,0.9118 ± 0.0096,0.9830 ± 0.0013,0.9921 ± 0.0008

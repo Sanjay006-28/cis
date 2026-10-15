@@ -1,0 +1,4 @@
+Comparison,Only TCN correct,Only other correct,p-value,Significant after Bonferroni (alpha 0.05/3)
+TCN vs BiLSTM,142,56,0.0,yes
+TCN vs Transformer,158,75,0.0,yes
+TCN vs XGBoost,37,101,0.0,yes

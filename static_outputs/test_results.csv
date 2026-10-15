@@ -1,0 +1,4 @@
+,Accuracy,Precision,Recall,F1,ROC-AUC
+Random Forest,0.9711,0.9602,0.9155,0.9373,0.9926
+XGBoost,0.98,0.9591,0.9563,0.9577,0.9961
+Fused (RF+XGB),0.9814,0.9675,0.9534,0.9604,0.9952

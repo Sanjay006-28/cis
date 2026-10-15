@@ -1,0 +1,2 @@
+,Accuracy,Precision,Recall (malware caught),Specificity (benign cleared),F1,ROC-AUC
+XGBoost on shares (cluster-held-out),0.9276 ± 0.0191,0.9714 ± 0.0123,0.9419 ± 0.0239,0.8526 ± 0.0379,0.9562 ± 0.0124,0.9520 ± 0.0206
