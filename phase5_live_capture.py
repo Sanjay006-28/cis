@@ -329,10 +329,44 @@ def analyze_strace_file(path, package="(from file)", seconds=0, bundle_path=BUND
                            "raw_text": text}, bundle_path)
 
 
+def _to_json_safe(obj):
+    """Recursively convert numpy / pandas types to plain Python for json.dumps."""
+    import numpy as np
+    if isinstance(obj, dict):
+        return {k: _to_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_json_safe(i) for i in obj]
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
 if __name__ == "__main__":
-    if len(sys.argv) >= 2 and sys.argv[1] == "check":
+    # Parse optional --json-out PATH from the end of argv
+    _args = sys.argv[1:]
+    _json_out_path = None
+    if "--json-out" in _args:
+        _idx = _args.index("--json-out")
+        if _idx + 1 < len(_args):
+            _json_out_path = _args[_idx + 1]
+            _args = _args[:_idx] + _args[_idx + 2:]   # remove flag + value
+
+    if len(_args) >= 1 and _args[0] == "check":
         check_setup()
-    elif len(sys.argv) >= 3 and sys.argv[1] == "run":
-        analyze_dynamic(sys.argv[2], seconds=int(sys.argv[3]) if len(sys.argv) > 3 else 60)
+    elif len(_args) >= 2 and _args[0] == "run":
+        _apk  = _args[1]
+        _secs = int(_args[2]) if len(_args) > 2 else 60
+        _out  = analyze_dynamic(_apk, seconds=_secs)
+        if _json_out_path and _out:
+            import json
+            try:
+                with open(_json_out_path, "w") as _jf:
+                    json.dump(_to_json_safe(_out), _jf, indent=2)
+            except Exception as _je:
+                print(f"[json-out] WARNING: could not write {_json_out_path}: {_je}")
     else:
         print("usage:  python phase5_live_capture.py check\n        python phase5_live_capture.py run your_app.apk [seconds]")

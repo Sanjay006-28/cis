@@ -12,6 +12,9 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -707,9 +710,8 @@ with tab_dynamic:
         "Dynamic analysis: system-call model on CICMalDroid2020 (11,520 unique apps)"
     )
     st.info(
-        "This app does NOT run uploaded APKs. These are results on a public, "
-        "pre-collected dataset of system-call counts. Live emulator analysis "
-        "is a separate, later extension."
+        "This tab shows benchmark results from the CICMalDroid2020 dataset "
+        "and includes a live emulator analysis interface in the **Phase 5** subtab below."
     )
 
     if not DYNAMIC_DIR.exists():
@@ -807,27 +809,425 @@ with tab_dynamic:
                 st.dataframe(df_unseen, use_container_width=True)
 
         with dyn_tab5:
-            st.subheader("Phase 5 Live Emulator Dynamic Capture Environment")
+            st.subheader("Phase 5: Live Emulator Dynamic Analysis")
+
+            # ------------------------------------------------------------------
+            # Session-state keys for Phase 5
+            # ------------------------------------------------------------------
+            if "p5_result" not in st.session_state:
+                st.session_state["p5_result"] = None
+            if "p5_running" not in st.session_state:
+                st.session_state["p5_running"] = False
+
+            # ------------------------------------------------------------------
+            # Description
+            # ------------------------------------------------------------------
             st.markdown(
-                "Live dynamic execution runs APKs inside an isolated Android Virtual Device (AVD), "
-                "synthesizes touches with `monkey`, and captures runtime kernel system calls via `strace`."
+                "Live dynamic analysis installs the selected APK in the connected Android emulator, "
+                "launches the application, simulates user interaction with `monkey`, and captures "
+                "kernel system calls via `strace`. The raw call counts are then mapped to the model's "
+                "139-feature vocabulary and passed through the trained XGBoost classifier."
             )
-            if st.button("🔍 Check Live ADB & Emulator Readiness", use_container_width=True):
+
+            st.warning(
+                "⚠️ **The selected APK will be installed and executed inside the connected Android emulator.** "
+                "Use only an emulator — never a real device — and only with APKs you are permitted to analyse."
+            )
+
+            st.markdown("---")
+
+            # ------------------------------------------------------------------
+            # ADB readiness check (independent button)
+            # ------------------------------------------------------------------
+            if st.button("🔍 Check Live ADB & Emulator Readiness", key="p5_check_btn", use_container_width=False):
                 try:
-                    from phase5_live_capture import find_adb, list_devices
+                    from phase5_live_capture import find_adb, list_devices, find_strace
                     adb_path = find_adb()
                     if adb_path:
-                        st.success(f"✅ **ADB Installed:** `{adb_path}`")
+                        st.success(f"✅ **ADB found:** `{adb_path}`")
                         devs = list_devices()
                         if devs:
-                            st.success(f"📱 **Active Device / Emulator Connected:** `{', '.join(devs)}`")
-                            st.info("Live capture is ready to execute from CLI via: `python phase5_live_capture.py <apk_path>`")
+                            st.success(f"📱 **Emulator connected:** `{', '.join(devs)}`")
+                            strace_bin = find_strace(devs[0])
+                            if strace_bin:
+                                st.success(f"🔧 **strace available on device:** `{strace_bin}`")
+                            else:
+                                st.warning("⚠️ `strace` was not found on the emulator. "
+                                           "Follow the instructions in phase5_live_capture.py to push a static binary.")
                         else:
-                            st.warning("⚠️ **No running Android emulator detected.** Start an AVD in Android Studio to enable live syscall tracing.")
+                            st.warning("⚠️ **No running emulator detected.** "
+                                       "Start an AVD in Android Studio and wait for the home screen.")
                     else:
-                        st.error("❌ **ADB not found.** Install Android Studio or add platform-tools to PATH.")
-                except Exception as exc:
-                    st.error(f"Environment check failed: {exc}")
+                        st.error("❌ **ADB not found.** "
+                                 "Install Android Studio or add platform-tools to your PATH / `~/bin/adb`.")
+                except Exception as _exc:
+                    st.error(f"Readiness check failed: {_exc}")
+
+            st.markdown("---")
+
+            # ------------------------------------------------------------------
+            # APK selection
+            # ------------------------------------------------------------------
+            st.subheader("1. Select APK")
+            apk_choice = st.radio(
+                "APK source",
+                ["Use bundled sample_app.apk", "Upload a different APK"],
+                key="p5_apk_choice",
+                horizontal=True,
+            )
+
+            p5_apk_path = None   # will be set to the resolved path string
+            p5_tmp_path  = None  # will be set if we write a temp file
+
+            if apk_choice == "Use bundled sample_app.apk":
+                if SAMPLE_APK.exists():
+                    p5_apk_path = str(SAMPLE_APK)
+                    st.info(f"📦 Bundled APK selected: `{SAMPLE_APK.name}` "
+                            f"({SAMPLE_APK.stat().st_size / 1024:.1f} KB)")
+                else:
+                    st.error(f"❌ `sample_app.apk` not found at `{SAMPLE_APK}`.")
+            else:
+                p5_uploaded = st.file_uploader(
+                    "Upload APK for live analysis",
+                    type=["apk"],
+                    key="p5_uploader",
+                    help="The file will be saved to a temporary path accessible from Ubuntu/WSL and deleted after analysis.",
+                )
+                if p5_uploaded is not None:
+                    if not p5_uploaded.name.lower().endswith(".apk"):
+                        st.error("❌ The uploaded file does not have an `.apk` extension.")
+                    else:
+                        st.success(f"✅ Uploaded: `{p5_uploaded.name}` "
+                                   f"({len(p5_uploaded.getvalue()) / 1024:.1f} KB)")
+                        # We defer writing the temp file until the Run button is clicked
+                        # to avoid writing on every Streamlit rerun.
+                else:
+                    st.warning("No APK uploaded yet.")
+
+            # ------------------------------------------------------------------
+            # Trace duration
+            # ------------------------------------------------------------------
+            st.subheader("2. Trace Duration")
+            p5_seconds = st.slider(
+                "System-call capture duration (seconds)",
+                min_value=10, max_value=300, value=30, step=5,
+                key="p5_seconds",
+                help="How long to run strace on the application. Longer runs give more stable counts but take more time.",
+            )
+
+            # ------------------------------------------------------------------
+            # Confirmation & run
+            # ------------------------------------------------------------------
+            st.subheader("3. Confirm & Run")
+            p5_confirmed = st.checkbox(
+                f"I confirm that the selected APK will be installed and executed inside the connected Android emulator for {p5_seconds} s.",
+                key="p5_confirm",
+            )
+
+            # Determine whether we have a valid APK ready to run
+            _p5_apk_ready = (
+                p5_apk_path is not None                          # sample APK resolved
+                or (
+                    apk_choice != "Use bundled sample_app.apk"
+                    and "p5_uploader" in st.session_state
+                    and st.session_state["p5_uploader"] is not None
+                )
+            )
+
+            run_col, _ = st.columns([2, 3])
+            with run_col:
+                p5_run = st.button(
+                    "🚀 Run Live Dynamic Analysis",
+                    key="p5_run_btn",
+                    type="primary",
+                    disabled=(not _p5_apk_ready) or (not p5_confirmed) or st.session_state["p5_running"],
+                    use_container_width=True,
+                )
+
+            if not _p5_apk_ready:
+                st.caption("Select a valid APK above to enable the Run button.")
+            elif not p5_confirmed:
+                st.caption("Tick the confirmation checkbox to enable the Run button.")
+
+            # ------------------------------------------------------------------
+            # Execute analysis
+            # ------------------------------------------------------------------
+            if p5_run and not st.session_state["p5_running"]:
+                st.session_state["p5_running"] = True
+                st.session_state["p5_result"] = None
+
+                # Resolve the actual APK path (writing temp file if needed)
+                _run_apk_path = None
+                _temp_apk    = None
+                _run_error   = None
+
+                try:
+                    if apk_choice == "Use bundled sample_app.apk":
+                        if not SAMPLE_APK.exists():
+                            _run_error = f"sample_app.apk not found at {SAMPLE_APK}"
+                        else:
+                            _run_apk_path = str(SAMPLE_APK)
+                    else:
+                        _uploaded_file = st.session_state.get("p5_uploader")
+                        if _uploaded_file is None:
+                            _run_error = "No APK was uploaded."
+                        elif not _uploaded_file.name.lower().endswith(".apk"):
+                            _run_error = "Uploaded file does not have an .apk extension."
+                        else:
+                            # Write to a temp file inside the project dir so
+                            # the WSL path resolves correctly.
+                            _fd, _temp_apk = tempfile.mkstemp(
+                                suffix=".apk",
+                                dir=str(BASE_DIR),
+                                prefix="_p5upload_",
+                            )
+                            os.write(_fd, _uploaded_file.getvalue())
+                            os.close(_fd)
+                            _run_apk_path = _temp_apk
+
+                    if _run_error:
+                        st.error(f"❌ {_run_error}")
+                    elif _run_apk_path:
+                        # Build a safe subprocess command — no shell interpolation.
+                        # We call the existing CLI of phase5_live_capture.py with an
+                        # extra --json-out flag that we will add to the script.
+                        _script = str(BASE_DIR / "phase5_live_capture.py")
+                        _json_out = str(BASE_DIR / "_p5_last_result.json")
+                        _cmd = [
+                            sys.executable, _script,
+                            "run", _run_apk_path, str(p5_seconds),
+                            "--json-out", _json_out,
+                        ]
+
+                        # Make ~/bin available so the adb wrapper is on PATH
+                        _env = os.environ.copy()
+                        _home = os.environ.get("HOME", os.path.expanduser("~"))
+                        _bin  = os.path.join(_home, "bin")
+                        if os.path.isdir(_bin) and _bin not in _env.get("PATH", ""):
+                            _env["PATH"] = _bin + ":" + _env.get("PATH", "")
+
+                        # Total timeout = install (~60s) + trace + inference + cleanup (~60s)
+                        _timeout = 120 + p5_seconds + 60
+
+                        with st.spinner(
+                            f"Running live analysis on `{os.path.basename(_run_apk_path)}` "
+                            f"({p5_seconds} s trace) — this will take at least {p5_seconds + 30} s …"
+                        ):
+                            try:
+                                _proc = subprocess.run(
+                                    _cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=_timeout,
+                                    cwd=str(BASE_DIR),
+                                    env=_env,
+                                )
+                                _stdout = _proc.stdout or ""
+                                _stderr = _proc.stderr or ""
+                                _combined_output = _stdout + ("\n" + _stderr if _stderr.strip() else "")
+
+                                if _proc.returncode != 0:
+                                    st.error(
+                                        f"❌ Analysis process exited with code {_proc.returncode}.\n\n"
+                                        f"```\n{_combined_output[-3000:]}\n```"
+                                    )
+                                else:
+                                    # Try to load structured JSON result
+                                    _structured = None
+                                    if os.path.exists(_json_out):
+                                        try:
+                                            with open(_json_out) as _jf:
+                                                _structured = json.load(_jf)
+                                        except Exception as _je:
+                                            st.warning(f"Could not parse JSON result file: {_je}")
+
+                                    st.session_state["p5_result"] = {
+                                        "structured": _structured,
+                                        "raw_report": _combined_output,
+                                        "apk_name": os.path.basename(_run_apk_path),
+                                        "requested_seconds": p5_seconds,
+                                    }
+                                    st.success("✅ Analysis complete.")
+
+                            except subprocess.TimeoutExpired:
+                                st.error(
+                                    f"❌ Analysis timed out after {_timeout} s. "
+                                    "The emulator may be busy or the APK took too long to start."
+                                )
+                            except Exception as _run_exc:
+                                st.error(f"❌ Unexpected error: {_run_exc}")
+
+                except Exception as _outer_exc:
+                    st.error(f"❌ Setup error before running analysis: {_outer_exc}")
+                finally:
+                    # Clean up temp APK
+                    if _temp_apk and os.path.exists(_temp_apk):
+                        try:
+                            os.remove(_temp_apk)
+                        except OSError:
+                            pass
+                    st.session_state["p5_running"] = False
+
+            # ------------------------------------------------------------------
+            # Display results from session state
+            # ------------------------------------------------------------------
+            _p5_res = st.session_state.get("p5_result")
+            if _p5_res is not None:
+                st.markdown("---")
+                st.subheader("📊 Live Analysis Results")
+                st.caption(
+                    f"APK: `{_p5_res['apk_name']}` · "
+                    f"Requested trace duration: {_p5_res['requested_seconds']} s"
+                )
+
+                _s = _p5_res.get("structured")
+
+                # Academic limitation notice (always visible with results)
+                st.info(
+                    "🎓 **Academic Limitation Notice** — "
+                    "The probability below is a model prediction, not definitive proof of malware. "
+                    "The model was trained on CICMalDroid2020 (older Android, ARM, longer captures) "
+                    "and applied here to an Android 14 x86_64 emulator — a different environment. "
+                    "Results are experimental until validated under representative conditions. "
+                    "SHAP values explain the model's decision but do not independently prove malicious behaviour."
+                )
+
+                if _s is not None:
+                    # ---- A. Analysis Summary --------------------------------
+                    _res    = _s.get("result", {})
+                    _pred   = _s.get("prediction", {})
+                    _mapped = _s.get("mapped", {})
+                    _cov    = _s.get("coverage", 0.0)
+
+                    st.markdown("#### A. Analysis Summary")
+                    _total_calls = sum(_res.get("counts", {}).values())
+                    _col1, _col2, _col3, _col4 = st.columns(4)
+                    _col1.metric("Package", _res.get("package", "?"))
+                    _col2.metric("Total syscalls", f"{_total_calls:,}")
+                    _col3.metric("Vocab coverage", f"{_cov:.0%}")
+                    _col4.metric("Features seen", str(len(_mapped)))
+
+                    if _cov < 0.8:
+                        st.warning(
+                            f"⚠️ Only {_cov:.0%} of system calls matched the model vocabulary. "
+                            "The emulator's syscall names differ substantially from the ARM training data. "
+                            "Treat the prediction as unreliable."
+                        )
+
+                    # ---- B. Model Predictions -------------------------------
+                    st.markdown("#### B. Model Predictions")
+                    _prob_shares = _pred.get("shares")
+                    _prob_counts = _pred.get("counts")
+
+                    if _prob_shares is not None:
+                        # Make the shares prediction visually prominent
+                        _pct = _prob_shares * 100
+                        if _pct >= 70:
+                            _badge_color = "#f8d7da"
+                            _badge_text_color = "#721c24"
+                            _risk_label = "HIGH MALWARE PROBABILITY"
+                        elif _pct >= 40:
+                            _badge_color = "#fff3cd"
+                            _badge_text_color = "#856404"
+                            _risk_label = "MODERATE MALWARE PROBABILITY"
+                        else:
+                            _badge_color = "#d4edda"
+                            _badge_text_color = "#155724"
+                            _risk_label = "LOW MALWARE PROBABILITY"
+
+                        st.markdown(
+                            f'<div style="background:{_badge_color};color:{_badge_text_color};'
+                            f'padding:1rem 1.5rem;border-radius:8px;font-size:1.4rem;'
+                            f'font-weight:700;text-align:center;margin-bottom:0.5rem;">'
+                            f'{_risk_label}<br/>'
+                            f'<span style="font-size:2rem;">{_pct:.1f}%</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                        st.caption(
+                            "Normalised-share probability (recommended for live runs — "
+                            "less sensitive to capture duration than raw counts)."
+                        )
+                        st.progress(float(min(max(_prob_shares, 0.0), 1.0)),
+                                    text=f"Malware probability (normalised shares): {_pct:.1f}%")
+
+                    _pred_col1, _pred_col2 = st.columns(2)
+                    if _prob_shares is not None:
+                        _pred_col1.metric("Malware prob — normalised shares (recommended)",
+                                          f"{_prob_shares:.1%}")
+                    if _prob_counts is not None:
+                        _pred_col2.metric("Malware prob — raw counts",
+                                          f"{_prob_counts:.1%}")
+
+                    st.caption(
+                        "No binary malware/benign verdict is applied: the model outputs a continuous "
+                        "probability and no validated decision threshold exists for this live environment."
+                    )
+
+                    # ---- C. System-Call Evidence ----------------------------
+                    _evidence = _pred.get("evidence", [])
+                    if _evidence:
+                        st.markdown("#### C. System-Call Evidence (SHAP — normalised-shares model)")
+                        st.caption(
+                            "Positive SHAP values (🔴) push the prediction **toward malware**. "
+                            "Negative SHAP values (🟢) push the prediction **toward benign**."
+                        )
+
+                        # Table
+                        _ev_rows = []
+                        for _name, _cnt, _sv in _evidence:
+                            _ev_rows.append({
+                                "System call": _name,
+                                "Count (raw)": int(_cnt),
+                                "SHAP value": round(_sv, 4),
+                                "Direction": "▲ toward malware" if _sv > 0 else "▼ toward benign",
+                            })
+                        _ev_df = pd.DataFrame(_ev_rows)
+                        st.dataframe(_ev_df, use_container_width=True, hide_index=True)
+
+                        # Horizontal bar chart
+                        _names_ev = [r["System call"] for r in _ev_rows]
+                        _shap_vals = [r["SHAP value"] for r in _ev_rows]
+                        _colours_ev = ["#c0392b" if v > 0 else "#27ae60" for v in _shap_vals]
+                        _labels_ev = [
+                            f"{r['System call']}  (count={int(r['Count (raw)'])})"
+                            for r in _ev_rows
+                        ]
+                        _fig_ev, _ax_ev = plt.subplots(
+                            figsize=(8, max(3, 0.5 * len(_names_ev)))
+                        )
+                        _y_ev = np.arange(len(_names_ev))
+                        _ax_ev.barh(_y_ev, _shap_vals, color=_colours_ev,
+                                    edgecolor="none", height=0.6)
+                        _ax_ev.set_yticks(_y_ev)
+                        _ax_ev.set_yticklabels(_labels_ev, fontsize=9)
+                        _ax_ev.invert_yaxis()
+                        _ax_ev.set_xlabel(
+                            "SHAP value  (red = toward malware, green = toward benign)",
+                            fontsize=9,
+                        )
+                        _ax_ev.axvline(0, color="#333", linewidth=0.8)
+                        _ax_ev.spines["top"].set_visible(False)
+                        _ax_ev.spines["right"].set_visible(False)
+                        _fig_ev.tight_layout()
+                        st.pyplot(_fig_ev, use_container_width=True)
+                        plt.close(_fig_ev)
+                    else:
+                        st.info("No SHAP evidence was returned (SHAP may have failed — "
+                                "check the raw report below for details).")
+
+                else:
+                    # Structured result not available — fall back gracefully
+                    st.warning(
+                        "Structured result data was not available. "
+                        "The raw report is shown below."
+                    )
+
+                # ---- D. Raw Report (always shown in expander) ---------------
+                _raw = _p5_res.get("raw_report", "")
+                if _raw.strip():
+                    with st.expander("📄 Raw Phase 5 Report (click to expand)", expanded=(_s is None)):
+                        st.code(_raw, language="text")
 
 
 # ============================= TAB 4 ======================================
