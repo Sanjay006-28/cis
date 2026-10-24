@@ -42,30 +42,176 @@ SAMPLE_APK   = BASE_DIR / "sample_app.apk"
 
 # ========================== page config ====================================
 st.set_page_config(
-    page_title=(
-        "AI-Based Detection of Malicious Sideloaded Android Applications "
-        "Using Runtime Threat Intelligence"
-    ),
+    page_title="Android Threat Analysis",
     layout="wide",
 )
 
 # ========================== global styles ==================================
 st.markdown("""
 <style>
-    /* Clean academic look: neutral palette, readable typography */
-    .main .block-container { max-width: 1100px; }
-    h1, h2, h3, h4 { font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; }
+    :root {
+        color-scheme: dark;
+        --soc-bg: #0b1220;
+        --soc-surface: #111c2e;
+        --soc-surface-raised: #172438;
+        --soc-border: #26364b;
+        --soc-text: #e6edf5;
+        --soc-muted: #9aabc0;
+        --soc-accent: #48c4c7;
+        --soc-accent-hover: #6dd6d5;
+    }
+
+    .stApp {
+        background: var(--soc-bg);
+        color: var(--soc-text);
+        font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+    }
+    .main .block-container {
+        width: 100%;
+        max-width: 1440px;
+        padding: 2rem clamp(1rem, 4vw, 3.25rem) 3rem;
+    }
+    h1, h2, h3, h4 {
+        color: var(--soc-text);
+        font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+        letter-spacing: -0.02em;
+    }
+    h1 { font-size: clamp(1.8rem, 3vw, 2.45rem); font-weight: 650; }
+    h2 { font-size: clamp(1.4rem, 2.2vw, 1.8rem); font-weight: 620; }
+    h3 { font-size: 1.2rem; font-weight: 600; }
+    p, label, li { color: var(--soc-text); }
+    small, [data-testid="stCaptionContainer"] { color: var(--soc-muted); }
+
+    [data-testid="stSidebar"] {
+        background: #0e1828;
+        border-right: 1px solid var(--soc-border);
+    }
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 {
+        color: var(--soc-text);
+    }
+
+    [role="tablist"] {
+        gap: 0.35rem;
+        border-bottom: 1px solid var(--soc-border);
+    }
+    [role="tab"] {
+        color: var(--soc-muted);
+        font-weight: 550;
+        border-radius: 6px 6px 0 0;
+    }
+    [role="tab"][aria-selected="true"] {
+        color: var(--soc-accent);
+        border-bottom-color: var(--soc-accent);
+    }
+    [role="tab"][aria-selected="true"] > [data-rac] {
+        background: var(--soc-accent);
+    }
+
+    [data-testid="stMetric"] {
+        height: 100%;
+        padding: 1rem 1.1rem;
+        background: var(--soc-surface);
+        border: 1px solid var(--soc-border);
+        border-radius: 10px;
+    }
+    [data-testid="stMetricLabel"] { color: var(--soc-muted); }
+    [data-testid="stMetricValue"] { color: var(--soc-text); }
+
+    .stButton > button,
+    .stDownloadButton > button {
+        min-height: 2.6rem;
+        border: 1px solid var(--soc-border);
+        border-radius: 7px;
+        color: var(--soc-text);
+        background: var(--soc-surface-raised);
+        font-weight: 550;
+        transition: border-color 120ms ease, background-color 120ms ease;
+    }
+    .stButton > button:hover,
+    .stDownloadButton > button:hover {
+        color: var(--soc-text);
+        border-color: var(--soc-accent);
+        background: #1b2b40;
+    }
+    .stButton > button[kind="primary"] {
+        color: #07151b;
+        border-color: var(--soc-accent);
+        background: var(--soc-accent);
+    }
+    .stButton > button[kind="primary"]:hover {
+        color: #07151b;
+        border-color: var(--soc-accent-hover);
+        background: var(--soc-accent-hover);
+    }
+
+    input, textarea, [data-baseweb="select"] > div {
+        color: var(--soc-text) !important;
+        background-color: var(--soc-surface) !important;
+        border-color: var(--soc-border) !important;
+    }
+    [data-testid="stFileUploader"] section {
+        background: var(--soc-surface);
+        border: 1px dashed #40536b;
+        border-radius: 9px;
+    }
+    [data-testid="stDataFrame"],
+    [data-testid="stTable"] {
+        border: 1px solid var(--soc-border);
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    [data-testid="stExpander"] {
+        background: var(--soc-surface);
+        border: 1px solid var(--soc-border);
+        border-radius: 8px;
+    }
+    [data-testid="stAlert"] {
+        border-radius: 8px;
+        border: 1px solid var(--soc-border);
+    }
+    [data-testid="stAlertContentInfo"] {
+        color: #b9dcf5;
+        background: #14283b;
+    }
+    [data-testid="stAlertContentSuccess"] {
+        color: #a5e5cd;
+        background: #142d2c;
+    }
+    [data-testid="stAlertContentWarning"] {
+        color: #f0d6a0;
+        background: #30291d;
+    }
+    [data-testid="stAlertContentError"] {
+        color: #ffb3bd;
+        background: #351d29;
+    }
+    [data-testid="stProgress"] > div > div {
+        background-color: var(--soc-accent);
+    }
+    hr {
+        border-color: var(--soc-border);
+        margin: 1.5rem 0;
+    }
+
     .verdict-benign {
-        background-color: #d4edda; color: #155724;
-        padding: 1rem 1.5rem; border-radius: 8px;
-        font-size: 1.6rem; font-weight: 700; text-align: center;
+        background-color: #102c2c; color: #8ce0c2;
+        padding: 1rem 1.5rem; border: 1px solid #286353; border-radius: 8px;
+        font-size: 1.5rem; font-weight: 700; text-align: center;
     }
     .verdict-malware {
-        background-color: #f8d7da; color: #721c24;
-        padding: 1rem 1.5rem; border-radius: 8px;
-        font-size: 1.6rem; font-weight: 700; text-align: center;
+        background-color: #351d29; color: #ffb3bd;
+        padding: 1rem 1.5rem; border: 1px solid #79404d; border-radius: 8px;
+        font-size: 1.5rem; font-weight: 700; text-align: center;
     }
-    .caption-text { color: #555; font-size: 0.85rem; }
+    .caption-text { color: var(--soc-muted); font-size: 0.875rem; }
+
+    @media (max-width: 640px) {
+        .main .block-container { padding: 1.25rem 1rem 2rem; }
+        [role="tablist"] { gap: 0.1rem; }
+        [role="tab"] { padding: 0.45rem 0.55rem; font-size: 0.85rem; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -345,8 +491,8 @@ with st.sidebar:
 
 
 # ========================== page header ====================================
-st.title("AI-Based Detection of Malicious Sideloaded Android Applications Using Runtime Threat Intelligence")
-st.markdown("A dual-pipeline framework combining static Drebin-215 features, dynamic CICMalDroid2020 system calls, Explainable AI (SHAP), and live IP reputation intelligence.")
+st.title("Android Threat Analysis")
+st.caption("Static and dynamic analysis for Android application security.")
 st.markdown("---")
 
 # ========================== tabs ===========================================
