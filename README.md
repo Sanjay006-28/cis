@@ -317,11 +317,10 @@ The system supports cross-platform execution on **Windows 11** and **Ubuntu on W
 #### Option A: Ubuntu on WSL 2 (Recommended for Linux/WSL Development)
 ```bash
 # Create and activate virtual environment
-python3 -m venv ~/venvs/malware-phase5
-source ~/venvs/malware-phase5/bin/activate
+python3 -m venv venv
+source venv/bin/activate
 
 # Install dependencies
-cd /mnt/c/Users/ASHWITH/Downloads/cis/malware
 pip install -r requirements.txt
 pip install reportlab python-docx
 ```
@@ -365,12 +364,12 @@ For convenience on Windows systems, preconfigured batch scripts manage the lifec
 
 ---
 
-### 1. Launch the Streamlit Web Application (Manual)
-Run the dashboard using Streamlit:
+### 1. Launch the Streamlit Web Application (Fallback / Direct Runner)
+Run the dashboard directly using Streamlit:
 
 **Ubuntu on WSL 2:**
 ```bash
-/home/ashwith/venvs/malware-phase5/bin/streamlit run app.py
+streamlit run app.py
 ```
 
 **Windows PowerShell:**
@@ -535,16 +534,15 @@ Run the FastAPI backend server from the repository root:
 
 **Ubuntu on WSL 2:**
 ```bash
-cd /mnt/c/Users/ASHWITH/Downloads/cis/malware
-source /home/ashwith/venvs/malware-phase5/bin/activate
-pip install -r requirements.txt
+# From repository root:
+source venv/bin/activate
 uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
 **Windows PowerShell:**
 ```powershell
-cd C:\Users\ASHWITH\Downloads\cis\malware
-.\venv\Scripts\Activate.ps1
+# From repository root:
+.\app_env\Scripts\Activate.ps1
 uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -556,13 +554,13 @@ In a separate terminal:
 
 **Ubuntu on WSL 2 / Windows:**
 ```bash
-cd /mnt/c/Users/ASHWITH/Downloads/cis/malware/frontend
+cd frontend
 npm run dev
 ```
 
 **Windows PowerShell:**
 ```powershell
-cd C:\Users\ASHWITH\Downloads\cis\malware\frontend
+cd frontend
 npm run dev
 ```
 
@@ -908,7 +906,6 @@ The live dynamic result is experimental: the CICMalDroid-trained model and the l
 From the repository root in Ubuntu/WSL:
 
 ```bash
-source /home/ashwith/venvs/malware-phase5/bin/activate
 streamlit run app.py --server.port 8501
 ```
 
