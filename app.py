@@ -8,6 +8,7 @@ lives in phase3_live_demo.py and is imported, never reimplemented.
 """
 
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -16,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 import matplotlib
@@ -90,6 +92,19 @@ st.markdown("""
     [data-testid="stSidebar"] h2,
     [data-testid="stSidebar"] h3 {
         color: var(--soc-text);
+    }
+    [data-testid="stSidebar"] [data-testid="stRadio"] {
+        gap: 0.2rem;
+    }
+    [data-testid="stSidebar"] label[data-testid="stRadioOption"] {
+        padding: 0.45rem 0.65rem;
+        border-left: 2px solid transparent;
+        border-radius: 0 6px 6px 0;
+    }
+    [data-testid="stSidebar"] label[data-testid="stRadioOption"][data-selected="true"] {
+        color: var(--soc-accent);
+        background: var(--soc-surface-raised);
+        border-left-color: var(--soc-accent);
     }
 
     [role="tablist"] {
@@ -214,6 +229,34 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+
+def cache_static_upload():
+    uploaded = st.session_state.get("static_apk_upload")
+    if uploaded is None:
+        st.session_state["static_upload_data"] = None
+        st.session_state["static_upload_name"] = None
+    else:
+        st.session_state["static_upload_data"] = uploaded.getvalue()
+        st.session_state["static_upload_name"] = uploaded.name
+
+
+def cache_dynamic_upload():
+    uploaded = st.session_state.get("p5_uploader")
+    if uploaded is None:
+        st.session_state["p5_upload_data"] = None
+        st.session_state["p5_upload_name"] = None
+    else:
+        st.session_state["p5_upload_data"] = uploaded.getvalue()
+        st.session_state["p5_upload_name"] = uploaded.name
+
+
+def remember_dynamic_source():
+    st.session_state["p5_apk_choice_saved"] = st.session_state["p5_apk_choice"]
+
+
+def navigate_to(section):
+    st.session_state["main_navigation"] = section
 
 
 # ========================== helper functions ===============================
@@ -454,6 +497,23 @@ def build_report_pdf(result: dict) -> bytes:
 
 # ========================== sidebar ========================================
 with st.sidebar:
+    st.markdown("### ANDROID THREAT ANALYSIS")
+    st.caption("Security analysis workspace")
+    st.radio(
+        "Workspace",
+        [
+            "Overview",
+            "Analyze APK",
+            "Dynamic Analysis",
+            "Environment & Emulator",
+            "Research & Benchmarks",
+            "About & Methodology",
+        ],
+        key="main_navigation",
+        label_visibility="collapsed",
+    )
+
+    st.markdown("---")
     st.header("⚙️ Configuration")
     api_key_input = st.text_input(
         "AbuseIPDB API key", type="password",
@@ -472,11 +532,8 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.subheader("🛡️ Pipeline Status")
-    st.markdown(
-        "- **Static Pipeline:** 🟢 Drebin-215 (RF + XGB)\n"
-        "- **Dynamic Engine:** 🟢 CICMalDroid2020\n"
-        f"- **Threat Intelligence:** {'🟢 API Connected' if abuse_key else '⚪ Passive (No API Key)'}"
+    st.caption(
+        f"Threat intelligence: {'API key configured' if abuse_key else 'Passive (no API key)'}"
     )
 
     st.markdown("---")
@@ -491,31 +548,198 @@ with st.sidebar:
 
 
 # ========================== page header ====================================
-st.title("Android Threat Analysis")
-st.caption("Static and dynamic analysis for Android application security.")
+active_page = st.session_state["main_navigation"]
+st.title(active_page)
+page_descriptions = {
+    "Overview": "Static and dynamic Android application analysis in one research workspace.",
+    "Analyze APK": "Inspect APK structure, static model evidence, and embedded network indicators.",
+    "Dynamic Analysis": "Run an explicitly confirmed system-call capture in the connected emulator.",
+    "Environment & Emulator": "Inspect the ADB and emulator prerequisites for dynamic analysis.",
+    "Research & Benchmarks": "Review the saved static and dynamic evaluation results.",
+    "About & Methodology": "Datasets, analysis methods, and experimental limitations.",
+}
+st.caption(page_descriptions[active_page])
 st.markdown("---")
 
-# ========================== tabs ===========================================
-tab_analyze, tab_static, tab_dynamic, tab_about = st.tabs([
-    "🔍 Analyze an APK",
-    "📊 Static Model Results",
-    "⚡ Dynamic Model Results",
-    "ℹ️ About and Limitations",
-])
+if active_page == "Overview":
+    st.subheader("Android application security analysis")
+    st.write(
+        "Review APKs with static feature extraction and model evidence, or run a "
+        "separately confirmed dynamic capture in an Android emulator. Historical "
+        "benchmark results are presented independently from live analysis."
+    )
+    static_col, dynamic_col = st.columns(2)
+    with static_col:
+        st.markdown("#### Static APK analysis")
+        st.caption("Drebin feature extraction, ensemble prediction, SHAP evidence, and optional threat intelligence.")
+        st.button(
+            "Open APK analysis",
+            key="overview_static_link",
+            on_click=navigate_to,
+            args=("Analyze APK",),
+            type="primary",
+        )
+    with dynamic_col:
+        st.markdown("#### Dynamic emulator analysis")
+        st.caption("Explicitly confirmed APK execution, syscall capture, and experimental model outputs.")
+        st.button(
+            "Open dynamic analysis",
+            key="overview_dynamic_link",
+            on_click=navigate_to,
+            args=("Dynamic Analysis",),
+        )
+
+    st.markdown("---")
+    st.subheader("Current session")
+    static_result = st.session_state.get("analysis_result")
+    dynamic_result = st.session_state.get("p5_result")
+    summary_col1, summary_col2 = st.columns(2)
+    if static_result is not None:
+        summary_col1.metric(
+            "Latest static analysis",
+            static_result.get("static", {}).get("verdict", "Result available"),
+            st.session_state.get("analyzed_app_name") or "Current session",
+        )
+    else:
+        summary_col1.metric("Latest static analysis", "Not run")
+    if dynamic_result is not None:
+        summary_col2.metric(
+            "Latest dynamic analysis",
+            dynamic_result.get("apk_name", "Result available"),
+            "Experimental result from this session",
+        )
+    else:
+        summary_col2.metric("Latest dynamic analysis", "Not run")
+
+    st.subheader("Environment status")
+    environment_result = st.session_state.get("environment_check")
+    if environment_result is None:
+        st.info("Emulator environment: Not checked in this session.")
+    elif environment_result.get("error"):
+        st.error(f"Emulator environment: Unavailable — {environment_result['error']}")
+    else:
+        st.write(
+            f"ADB: **{environment_result['adb_status']}** · "
+            f"Emulator: **{environment_result['device_status']}** · "
+            f"Dynamic model: **{environment_result['model_status']}**"
+        )
+
+    static_model_status = "Ready" if (BASE_DIR / "static_outputs" / "static_model.joblib").is_file() else "Unavailable"
+    dynamic_model_status = "Ready" if (DYNAMIC_DIR / "dynamic_model.joblib").is_file() else "Unavailable"
+    st.caption(
+        f"Model artifacts — static: {static_model_status}; dynamic: {dynamic_model_status}. "
+        "Artifact presence does not verify runtime compatibility."
+    )
 
 
-# ============================= TAB 1 ======================================
-with tab_analyze:
+if active_page == "Environment & Emulator":
+    st.subheader("Dynamic-analysis prerequisites")
+    st.write(
+        "Run a read-only readiness inspection when needed. This check does not install "
+        "or execute an APK and does not invoke `adb root`."
+    )
+    if st.button("Check ADB and emulator readiness", key="environment_check_button"):
+        try:
+            from phase5_live_capture import find_adb, list_devices, find_strace, sh
+
+            adb_path = find_adb()
+            devices = list_devices() if adb_path else []
+            device = devices[0] if devices else None
+            device_info = {}
+            root_status = "Not checked"
+            monkey_path = None
+            strace_path = None
+            if device:
+                device_info = {
+                    "Android version": sh("getprop ro.build.version.release", device=device)[1],
+                    "API level": sh("getprop ro.build.version.sdk", device=device)[1],
+                    "CPU ABI": sh("getprop ro.product.cpu.abi", device=device)[1],
+                    "Build type": sh("getprop ro.build.type", device=device)[1],
+                }
+                root_status = "Available" if "uid=0" in sh("id", device=device)[1] else "Not ready (root unavailable)"
+                monkey_path = sh("which monkey", device=device)[1] or None
+                strace_path = find_strace(device)
+
+            dynamic_model_exists = (DYNAMIC_DIR / "dynamic_model.joblib").is_file()
+            st.session_state["environment_check"] = {
+                "adb_status": "Available" if adb_path else "Unavailable",
+                "adb_path": adb_path,
+                "device_status": "Connected" if device else "Not ready",
+                "devices": devices,
+                "device_info": device_info,
+                "root_status": root_status,
+                "monkey_path": monkey_path,
+                "strace_path": strace_path,
+                "model_status": "Available" if dynamic_model_exists else "Unavailable",
+            }
+        except Exception as exc:
+            st.session_state["environment_check"] = {"error": str(exc)}
+
+    environment_result = st.session_state.get("environment_check")
+    if environment_result is None:
+        st.info("Status: Not checked. Select the button above to inspect the configured environment.")
+    elif environment_result.get("error"):
+        st.error(f"Readiness inspection failed: {environment_result['error']}")
+    else:
+        st.markdown("#### Readiness results")
+        st.write(f"ADB: **{environment_result['adb_status']}**")
+        if environment_result.get("adb_path"):
+            st.code(environment_result["adb_path"])
+        st.write(f"Connected emulator/device: **{environment_result['device_status']}**")
+        if environment_result.get("devices"):
+            st.write(", ".join(environment_result["devices"]))
+        if environment_result.get("device_info"):
+            st.dataframe(
+                pd.DataFrame(
+                    environment_result["device_info"].items(),
+                    columns=["Device property", "Value"],
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+        st.write(f"Root access: **{environment_result['root_status']}** (checked without changing device state)")
+        st.write(
+            f"strace: **{environment_result['strace_path'] or 'Unavailable'}** · "
+            f"monkey: **{environment_result['monkey_path'] or 'Unavailable'}**"
+        )
+        st.write(f"Dynamic model artifact: **{environment_result['model_status']}**")
+        if (
+            environment_result["adb_status"] != "Available"
+            or environment_result["device_status"] != "Connected"
+            or environment_result["root_status"] != "Available"
+            or not environment_result["strace_path"]
+            or not environment_result["monkey_path"]
+            or environment_result["model_status"] != "Available"
+        ):
+            st.warning(
+                "Dynamic analysis is not ready. Add Android platform-tools to PATH or configure the "
+                "existing ADB wrapper, start an emulator, and use a rooted Google APIs image with "
+                "monkey, strace, and the dynamic model artifact available."
+            )
+
+    if st.session_state.get("p5_result") is None:
+        st.caption("Environment checks are separate from APK execution. No APK has been run from this page.")
+
+
+# ============================= ANALYZE APK ================================
+if active_page == "Analyze APK":
     st.header("Analyze an APK")
 
     uploaded = st.file_uploader(
         "Upload an APK file", type=["apk"],
         help="The APK is only read (like opening a zip). It is never installed or run.",
+        key="static_apk_upload",
+        on_change=cache_static_upload,
     )
+    if uploaded is None and st.session_state.get("static_upload_data") is not None:
+        uploaded = io.BytesIO(st.session_state["static_upload_data"])
+        uploaded.name = st.session_state["static_upload_name"]
 
     # State initialization
     if "analysis_result" not in st.session_state:
         st.session_state["analysis_result"] = None
+    if "analysis_result_fingerprint" not in st.session_state:
+        st.session_state["analysis_result_fingerprint"] = None
     if "analyzed_app_name" not in st.session_state:
         st.session_state["analyzed_app_name"] = None
     if "use_sample_active" not in st.session_state:
@@ -523,14 +747,32 @@ with tab_analyze:
     if "last_uploaded_name" not in st.session_state:
         st.session_state["last_uploaded_name"] = None
 
-    # Reset result if a new file is uploaded
-    if uploaded is not None and uploaded.name != st.session_state.get("last_uploaded_name"):
+    uploaded_fingerprint = None
+    if uploaded is not None:
+        uploaded_fingerprint = (
+            uploaded.name,
+            hashlib.sha256(uploaded.getvalue()).hexdigest(),
+        )
+    if uploaded is not None and uploaded_fingerprint != st.session_state.get("last_uploaded_fingerprint"):
         st.session_state["last_uploaded_name"] = uploaded.name
+        st.session_state["last_uploaded_fingerprint"] = uploaded_fingerprint
         st.session_state["use_sample_active"] = False
         st.session_state["analysis_result"] = None
+        st.session_state["analysis_result_fingerprint"] = None
     elif uploaded is None and not st.session_state.get("use_sample_active", False):
         st.session_state["last_uploaded_name"] = None
+        st.session_state["last_uploaded_fingerprint"] = None
 
+    selected_fingerprint = None
+    if st.session_state.get("use_sample_active", False) and SAMPLE_APK.exists():
+        selected_fingerprint = (
+            SAMPLE_APK.name,
+            hashlib.sha256(SAMPLE_APK.read_bytes()).hexdigest(),
+        )
+    elif uploaded is not None:
+        selected_fingerprint = uploaded_fingerprint
+
+    st.subheader("A. APK Selection")
     # Check whether an APK has been added or not
     if uploaded is not None and not st.session_state.get("use_sample_active", False):
         file_bytes = uploaded.getvalue()
@@ -578,6 +820,7 @@ with tab_analyze:
         if SAMPLE_APK.exists():
             st.session_state["use_sample_active"] = True
             st.session_state["analysis_result"] = None
+            st.session_state["analysis_result_fingerprint"] = None
             st.session_state["analyzed_app_name"] = SAMPLE_APK.name
             st.rerun()
         else:
@@ -585,6 +828,7 @@ with tab_analyze:
 
     if stop_analysis:
         st.session_state["analysis_result"] = None
+        st.session_state["analysis_result_fingerprint"] = None
         st.session_state["analyzed_app_name"] = None
         st.session_state["use_sample_active"] = False
         st.toast("Analysis stopped and cleared.", icon="⏹️")
@@ -613,6 +857,7 @@ with tab_analyze:
                         top_n=12,
                     )
                     st.session_state["analysis_result"] = res
+                    st.session_state["analysis_result_fingerprint"] = selected_fingerprint
                     st.session_state["analyzed_app_name"] = active_app_label
         except ValueError as exc:
             st.error(str(exc))
@@ -627,6 +872,12 @@ with tab_analyze:
 
     # Retrieve cached analysis result from session state
     result = st.session_state.get("analysis_result")
+    if (
+        result is not None
+        and st.session_state.get("analysis_result_fingerprint") != selected_fingerprint
+    ):
+        result = None
+        st.info("The previous result belongs to a different APK. Run analysis to update it.")
     if result is not None:
         info = result["info"]
         static = result["static"]
@@ -639,6 +890,7 @@ with tab_analyze:
         total_features = row.shape[1]
         n_detected = len(detected_names)
 
+        st.subheader("B. Static Analysis Summary")
         # 1. Verdict banner & Metrics
         css_class = "verdict-benign" if verdict == "BENIGN" else "verdict-malware"
         st.markdown(
@@ -665,24 +917,8 @@ with tab_analyze:
 
         st.markdown("---")
 
-        # 2. SHAP evidence chart
-        st.subheader("Why did the model decide this?")
-        evidence = static["evidence"]
-        if evidence:
-            fig = build_shap_chart(evidence)
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
-            st.caption(
-                "Red bars push the verdict toward malware; "
-                "green bars push it toward benign."
-            )
-        else:
-            st.info("No SHAP evidence available.")
-
-        st.markdown("---")
-
         # 3. Features detected
-        st.subheader("Features detected")
+        st.subheader("C. Extracted Features")
         # Count per group
         group_counts = {"permissions": 0, "intents": 0, "API calls": 0, "commands": 0}
         for f in detected_names:
@@ -721,8 +957,24 @@ with tab_analyze:
 
         st.markdown("---")
 
+        # 2. SHAP evidence chart
+        st.subheader("D. Model Evidence and SHAP")
+        evidence = static["evidence"]
+        if evidence:
+            fig = build_shap_chart(evidence)
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+            st.caption(
+                "Red bars push the verdict toward malware; "
+                "green bars push it toward benign."
+            )
+        else:
+            st.info("No SHAP evidence available.")
+
+        st.markdown("---")
+
         # 4. Threat intelligence
-        st.subheader("Threat intelligence")
+        st.subheader("E. Threat Intelligence")
 
         ips = result["ips"]
         domains = result["domains"]
@@ -776,7 +1028,7 @@ with tab_analyze:
         st.markdown("---")
 
         # 5. Download report
-        st.subheader("Export Security Report")
+        st.subheader("F. Export Report")
         col_dl_json, col_dl_pdf = st.columns(2)
         with col_dl_json:
             st.download_button(
@@ -805,11 +1057,10 @@ with tab_analyze:
     )
 
 
-# ============================= TAB 2 ======================================
-with tab_static:
-    st.header(
-        "Static analysis: Random Forest + XGBoost on Drebin-215 (7,254 unique apps)"
-    )
+# ============================= RESEARCH & BENCHMARKS ======================
+if active_page == "Research & Benchmarks":
+    st.header("Static-analysis benchmarks")
+    st.caption("Saved evaluation results and visualizations from the Drebin-215 research pipeline.")
 
     # Test results
     df_test = safe_read_csv(
@@ -850,31 +1101,24 @@ with tab_static:
         )
 
 
-# ============================= TAB 3 ======================================
-with tab_dynamic:
-    st.header(
-        "Dynamic analysis: system-call model on CICMalDroid2020 (11,520 unique apps)"
-    )
-    st.info(
-        "This tab shows benchmark results from the CICMalDroid2020 dataset "
-        "and includes a live emulator analysis interface in the **Phase 5** subtab below."
-    )
+# ============================= DYNAMIC / RESEARCH =========================
+if active_page in ("Dynamic Analysis", "Research & Benchmarks"):
+    if active_page == "Research & Benchmarks":
+        st.markdown("---")
+        st.header("Dynamic-analysis benchmarks")
+        st.caption("Historical CICMalDroid2020 evaluation results; live emulator results are shown separately.")
+    else:
+        st.subheader("Phase 5: Live emulator analysis")
+        st.caption("Experimental runtime capture on the configured Android emulator.")
 
-    if not DYNAMIC_DIR.exists():
+    if active_page == "Research & Benchmarks" and not DYNAMIC_DIR.exists():
         st.warning(
             f"The folder '{DYNAMIC_DIR.name}' was not found. "
             "Dynamic model results are unavailable."
         )
-    else:
-        dyn_tab1, dyn_tab2, dyn_tab3, dyn_tab4, dyn_tab5 = st.tabs([
-            "🏆 Cluster-Held-Out (Primary Benchmark)",
-            "📊 Architecture Comparison (DL vs XGBoost)",
-            "📉 Feature Reduction Analysis",
-            "🔬 Statistical Tests & Generalization",
-            "📲 Phase 5: Live Emulator Pre-flight Check",
-        ])
+    elif active_page == "Research & Benchmarks":
 
-        with dyn_tab1:
+        if active_page == "Research & Benchmarks":
             st.subheader("Cluster-Held-Out 5-Fold Cross-Validation (Conservative Ground Truth)")
             st.caption(
                 "Apps with similar behavior are grouped together in clusters and held out, "
@@ -900,7 +1144,7 @@ with tab_dynamic:
             with col_b:
                 safe_show_image(DYNAMIC_DIR / "3_roc_pr_curves.png", "ROC and precision-recall curves")
 
-        with dyn_tab2:
+        if active_page == "Research & Benchmarks":
             st.subheader("Random 80/20 Benchmark Split")
             st.caption("Standard random split comparable with literature (optimistic baseline).")
             df_test_dyn = safe_read_csv(DYNAMIC_DIR / "test_results.csv", index_col=0)
@@ -927,7 +1171,7 @@ with tab_dynamic:
             with col_c2:
                 safe_show_image(DYNAMIC_DIR / "4_shap_summary.png", "SHAP summary (beeswarm)")
 
-        with dyn_tab3:
+        if active_page == "Research & Benchmarks":
             st.subheader("Feature Count Sensitivity (139 System Calls)")
             st.caption("Evaluation of how many system calls are required to maintain detection accuracy.")
             df_feat = safe_read_csv(DYNAMIC_DIR / "feature_count_analysis.csv")
@@ -936,7 +1180,7 @@ with tab_dynamic:
             safe_show_image(DYNAMIC_DIR / "6_accuracy_vs_features.png", "Accuracy vs. number of features kept")
             safe_show_image(DYNAMIC_DIR / "5_shap_bar.png", "Global mean |SHAP| values")
 
-        with dyn_tab4:
+        if active_page == "Research & Benchmarks":
             st.subheader("McNemar's Statistical Significance Tests")
             st.caption("Statistical pairwise differences between deep learning architectures (TCN) and baselines (significance threshold p < 0.0167).")
             df_mcn_cluster = safe_read_csv(DYNAMIC_DIR / "mcnemar_cluster_heldout.csv")
@@ -954,9 +1198,8 @@ with tab_dynamic:
             if df_unseen is not None:
                 st.dataframe(df_unseen, use_container_width=True)
 
-        with dyn_tab5:
-            st.subheader("Phase 5: Live Emulator Dynamic Analysis")
-
+    if active_page == "Dynamic Analysis":
+        with st.container():
             # ------------------------------------------------------------------
             # Session-state keys for Phase 5
             # ------------------------------------------------------------------
@@ -979,35 +1222,23 @@ with tab_dynamic:
                 "⚠️ **The selected APK will be installed and executed inside the connected Android emulator.** "
                 "Use only an emulator — never a real device — and only with APKs you are permitted to analyse."
             )
-
-            st.markdown("---")
-
-            # ------------------------------------------------------------------
-            # ADB readiness check (independent button)
-            # ------------------------------------------------------------------
-            if st.button("🔍 Check Live ADB & Emulator Readiness", key="p5_check_btn", use_container_width=False):
-                try:
-                    from phase5_live_capture import find_adb, list_devices, find_strace
-                    adb_path = find_adb()
-                    if adb_path:
-                        st.success(f"✅ **ADB found:** `{adb_path}`")
-                        devs = list_devices()
-                        if devs:
-                            st.success(f"📱 **Emulator connected:** `{', '.join(devs)}`")
-                            strace_bin = find_strace(devs[0])
-                            if strace_bin:
-                                st.success(f"🔧 **strace available on device:** `{strace_bin}`")
-                            else:
-                                st.warning("⚠️ `strace` was not found on the emulator. "
-                                           "Follow the instructions in phase5_live_capture.py to push a static binary.")
-                        else:
-                            st.warning("⚠️ **No running emulator detected.** "
-                                       "Start an AVD in Android Studio and wait for the home screen.")
-                    else:
-                        st.error("❌ **ADB not found.** "
-                                 "Install Android Studio or add platform-tools to your PATH / `~/bin/adb`.")
-                except Exception as _exc:
-                    st.error(f"Readiness check failed: {_exc}")
+            _environment = st.session_state.get("environment_check")
+            if _environment is None:
+                st.info("Emulator readiness: Not checked. Use Environment & Emulator to inspect prerequisites.")
+            elif _environment.get("error"):
+                st.warning(f"Latest environment check: Unavailable — {_environment['error']}")
+            else:
+                st.caption(
+                    f"Latest environment check — ADB: {_environment['adb_status']} · "
+                    f"Device: {_environment['device_status']} · "
+                    f"Dynamic model: {_environment['model_status']}"
+                )
+            st.button(
+                "Open Environment & Emulator",
+                key="dynamic_environment_link",
+                on_click=navigate_to,
+                args=("Environment & Emulator",),
+            )
 
             st.markdown("---")
 
@@ -1019,6 +1250,13 @@ with tab_dynamic:
                 "APK source",
                 ["Use bundled sample_app.apk", "Upload a different APK"],
                 key="p5_apk_choice",
+                index=(
+                    1
+                    if st.session_state.get("p5_apk_choice_saved")
+                    == "Upload a different APK"
+                    else 0
+                ),
+                on_change=remember_dynamic_source,
                 horizontal=True,
             )
 
@@ -1037,8 +1275,12 @@ with tab_dynamic:
                     "Upload APK for live analysis",
                     type=["apk"],
                     key="p5_uploader",
+                    on_change=cache_dynamic_upload,
                     help="The file will be saved to a temporary path accessible from Ubuntu/WSL and deleted after analysis.",
                 )
+                if p5_uploaded is None and st.session_state.get("p5_upload_data") is not None:
+                    p5_uploaded = io.BytesIO(st.session_state["p5_upload_data"])
+                    p5_uploaded.name = st.session_state["p5_upload_name"]
                 if p5_uploaded is not None:
                     if not p5_uploaded.name.lower().endswith(".apk"):
                         st.error("❌ The uploaded file does not have an `.apk` extension.")
@@ -1049,6 +1291,19 @@ with tab_dynamic:
                         # to avoid writing on every Streamlit rerun.
                 else:
                     st.warning("No APK uploaded yet.")
+
+            if apk_choice == "Use bundled sample_app.apk" and SAMPLE_APK.is_file():
+                _p5_selected_fingerprint = (
+                    SAMPLE_APK.name,
+                    hashlib.sha256(SAMPLE_APK.read_bytes()).hexdigest(),
+                )
+            elif apk_choice != "Use bundled sample_app.apk" and p5_uploaded is not None:
+                _p5_selected_fingerprint = (
+                    p5_uploaded.name,
+                    hashlib.sha256(p5_uploaded.getvalue()).hexdigest(),
+                )
+            else:
+                _p5_selected_fingerprint = None
 
             # ------------------------------------------------------------------
             # Trace duration
@@ -1075,8 +1330,8 @@ with tab_dynamic:
                 p5_apk_path is not None                          # sample APK resolved
                 or (
                     apk_choice != "Use bundled sample_app.apk"
-                    and "p5_uploader" in st.session_state
-                    and st.session_state["p5_uploader"] is not None
+                    and p5_uploaded is not None
+                    and p5_uploaded.name.lower().endswith(".apk")
                 )
             )
 
@@ -1117,7 +1372,7 @@ with tab_dynamic:
                             # resolve it from the subprocess working directory.
                             _run_apk_path = str(SAMPLE_APK.relative_to(BASE_DIR))
                     else:
-                        _uploaded_file = st.session_state.get("p5_uploader")
+                        _uploaded_file = p5_uploaded
                         if _uploaded_file is None:
                             _run_error = "No APK was uploaded."
                         elif not _uploaded_file.name.lower().endswith(".apk"):
@@ -1146,8 +1401,8 @@ with tab_dynamic:
                         _script = str(BASE_DIR / "phase5_live_capture.py")
                         # Use a relative path for --json-out too, so the
                         # subprocess (cwd=BASE_DIR) creates it in the right place.
-                        _json_out_rel = "_p5_last_result.json"
-                        _json_out_abs = str(BASE_DIR / "_p5_last_result.json")
+                        _json_out_rel = f"_p5_result_{uuid.uuid4().hex}.json"
+                        _json_out_abs = str(BASE_DIR / _json_out_rel)
                         _cmd = [
                             sys.executable, _script,
                             "run", _run_apk_path, str(p5_seconds),
@@ -1201,6 +1456,7 @@ with tab_dynamic:
                                         "raw_report": _combined_output,
                                         "apk_name": os.path.basename(_run_apk_path),
                                         "requested_seconds": p5_seconds,
+                                        "apk_fingerprint": _p5_selected_fingerprint,
                                     }
                                     st.success("✅ Analysis complete.")
 
@@ -1221,12 +1477,21 @@ with tab_dynamic:
                             os.remove(_temp_apk)
                         except OSError:
                             pass
+                    if "_json_out_abs" in locals() and os.path.exists(_json_out_abs):
+                        try:
+                            os.remove(_json_out_abs)
+                        except OSError:
+                            pass
                     st.session_state["p5_running"] = False
 
             # ------------------------------------------------------------------
             # Display results from session state
             # ------------------------------------------------------------------
             _p5_res = st.session_state.get("p5_result")
+            if _p5_res is not None:
+                if _p5_res.get("apk_fingerprint") != _p5_selected_fingerprint:
+                    st.info("The saved dynamic result belongs to a different APK selection. Run a new capture to replace it.")
+                    _p5_res = None
             if _p5_res is not None:
                 st.markdown("---")
                 st.subheader("📊 Live Analysis Results")
@@ -1385,20 +1650,20 @@ with tab_dynamic:
                         st.code(_raw, language="text")
 
 
-# ============================= TAB 4 ======================================
-with tab_about:
-    st.header("About the System & Research Methodology")
+# ============================= ABOUT & METHODOLOGY ========================
+if active_page == "About & Methodology":
+    st.header("System methodology")
 
     col_ab1, col_ab2 = st.columns(2)
     with col_ab1:
-        st.subheader("🛡️ Static Analysis (Drebin-215)")
+        st.subheader("Static analysis · Drebin-215")
         st.markdown("""
 - **Model**: Fused Ensemble of Random Forest & XGBoost.
 - **Dataset**: Drebin-215 benchmark comprising 7,254 unique Android applications.
 - **Feature Space**: 215 static indicators spanning permissions, intents, API calls, and commands.
 - **Explainability**: SHAP TreeExplainer delivers exact local feature attributions for every prediction.
 """)
-        st.subheader("🌐 Threat Intelligence (AbuseIPDB)")
+        st.subheader("Threat intelligence · AbuseIPDB")
         st.markdown("""
 - **Mechanism**: Bytecode inspection extracts embedded IPv4 addresses and domains.
 - **Querying**: Live queries against the AbuseIPDB API v2 retrieve confidence scores and reputation history.
@@ -1406,13 +1671,13 @@ with tab_about:
 """)
 
     with col_ab2:
-        st.subheader("⚡ Dynamic Analysis (CICMalDroid2020)")
+        st.subheader("Dynamic analysis · CICMalDroid2020")
         st.markdown("""
 - **Model Suite**: XGBoost alongside deep architectures (TCN, BiLSTM, Transformer).
 - **Dataset**: CICMalDroid2020 dataset of 11,520 applications across 139 kernel system calls.
 - **Rigorous Validation**: Cluster-held-out splits prevent family leakage, ensuring genuine generalization estimates.
 """)
-        st.subheader("📲 Phase 5: Live Emulation Extension")
+        st.subheader("Live emulation")
         st.markdown("""
 - **Execution**: Android Virtual Device (AVD) running under `adb root`.
 - **Instrumentation**: Traces Linux kernel system calls using `strace` while simulating user interaction with `monkey`.

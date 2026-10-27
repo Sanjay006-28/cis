@@ -15,7 +15,7 @@ This project delivers a production-grade defense-in-depth architecture:
 3. **Local Explainable AI (SHAP)**: Provides local interpretability for every analyzed APK using `shap.TreeExplainer`, detailing exact feature attributions pushing predictions toward benign or malware.
 4. **Threat Intelligence Enrichment (AbuseIPDB)**: Extracts embedded public IP addresses and domains from application bytecode and cross-references them against live cyber threat intelligence feeds.
 5. **Live Dynamic Sandbox Emulation (CICMalDroid2020 & strace)**: Automated runtime execution on a rooted Android emulator with UI monkey event fuzzing, capturing 139 Linux kernel system calls evaluated against deep learning models (TCN, BiLSTM, Transformer) and XGBoost.
-6. **Interactive Streamlit Web Dashboard**: Production-grade web interface for uploading APKs, viewing real-time verdicts, inspecting interactive SHAP charts, triggering live dynamic ADB sandbox traces, and exporting SIEM-compliant JSON audit reports.
+6. **Web Presentation Layer**: React, TypeScript, and Vite frontend backed by FastAPI, with the existing Streamlit dashboard retained as a fallback.
 
 ---
 
@@ -91,13 +91,15 @@ flowchart TD
         DynXGB & DL --> ClusterCV[Cluster-Held-Out Evaluation]
     end
 
-    subgraph Dashboard["5. Streamlit User Interface"]
+    subgraph Dashboard["5. Web and fallback interfaces"]
         Ensemble --> UI[Streamlit Web App app.py]
         SHAP --> UI
         NetRisk --> UI
         ClusterCV --> UI
         DynXGB --> UI
         UI --> Export[JSON Security Audit Report Export]
+        Ensemble --> API[FastAPI API]
+        API --> React[React + TypeScript frontend]
     end
 ```
 
@@ -134,7 +136,25 @@ Pairwise McNemar hypothesis tests with Bonferroni correction ($\alpha = 0.05/3$)
 ## 📁 Repository Structure
 
 ```text
-├── app.py                                                # Main Streamlit web application interface
+├── app.py                                                # Existing Streamlit fallback dashboard
+├── backend/                                              # FastAPI REST API service
+│   ├── __init__.py                                       # Package marker
+│   ├── main.py                                           # FastAPI application routes, jobs & readiness logic
+│   ├── reports.py                                        # JSON and PDF static report generators
+│   └── schemas.py                                        # Pydantic v2 request/response schemas
+├── frontend/                                             # Modern React + TypeScript + Vite web interface
+│   ├── index.html                                        # Single-page application entry HTML
+│   ├── package.json                                      # Frontend dependencies and build scripts
+│   ├── vite.config.ts                                    # Vite bundler & WSL/Windows API proxy configuration
+│   ├── tailwind.config.js                                # Tailwind CSS design configuration
+│   └── src/
+│       ├── api/client.ts                                 # Typed API client for FastAPI backend
+│       ├── components/                                   # Layout, metric cards, state indicators
+│       ├── pages/                                        # Overview, Analyze, Dynamic, Environment, Research, About
+│       ├── types.ts                                      # TypeScript domain models and API contracts
+│       └── styles.css                                    # Design system and cybersecurity styling
+├── tests/                                                # Automated test suite
+│   └── test_api_contract.py                              # Backend API contract, readiness & validation tests
 ├── phase3_live_demo.py                                   # Static analysis engine, feature extractor & AbuseIPDB client
 ├── phase5_live_capture.py                                # Dynamic strace capture pipeline via ADB & Android emulator
 ├── requirements.txt                                      # Python dependencies
@@ -250,10 +270,7 @@ Execute static feature extraction and threat intelligence from the terminal:
 python phase3_live_demo.py sample_app.apk
 ```
 
-**Optional Arguments:**
-- `--key <ABUSEIPDB_API_KEY>`: Query AbuseIPDB for reputation scores of embedded IPs.
-- `--resolve`: Perform live DNS resolution of embedded hostnames to query resolved IPs.
-- `--top <N>`: Display top $N$ SHAP evidence features (default: 8).
+For AbuseIPDB lookups, set `ABUSEIPDB_KEY` in the environment before running the command. This demo's command-line entry point accepts the APK path; optional DNS resolution and evidence display settings are available through the Python `analyze_apk` API.
 
 ---
 
@@ -267,9 +284,9 @@ Run dynamic system call capture and prediction directly from the terminal:
    ```
 3. Run live capture and inference:
    ```bash
-   python phase5_live_capture.py sample_app.apk 30
+   python phase5_live_capture.py run sample_app.apk 30
    ```
-   *(Optional `--json-out <path>` flag exports structured JSON results).*
+   *(Optional `--json-out <path>` flag exports structured JSON results.)*
 
 ---
 
@@ -309,3 +326,154 @@ To enable live reputation lookups for embedded public IP addresses:
 - **Static Safety**: The static analyzer only inspects the APK container (like reading a zip archive). The target APK is never installed or executed on the host system.
 - **Dynamic Isolation**: Dynamic emulation executes applications strictly inside an isolated Android emulator sandbox. Never execute unverified APKs on physical production devices.
 - **Academic Context**: Static models were trained on the Drebin-215 dataset; dynamic models were trained on CICMalDroid2020. Predictions provide probabilistic decision support and should be paired with human review.
+
+---
+
+## 🖥️ React + FastAPI Web Application
+
+The React frontend is an independent application; it communicates with FastAPI over HTTP and does not embed React in Streamlit. The model artifacts and all analysis logic remain in the Python backend. The existing Streamlit application remains available as a fallback.
+
+### Prerequisites
+- Node.js and npm
+- The existing Python environment and project dependencies
+- For dynamic analysis only: the existing WSL-to-Windows ADB wrapper, a supported rooted Android emulator, `strace`, and the dynamic model artifact
+
+### Install frontend dependencies
+
+From the repository root:
+
+```bash
+cd frontend
+npm install
+```
+
+After the first install, `npm ci` can reproduce the committed `package-lock.json`.
+
+### Configure the API URL
+
+In the Vite development server, `/api` requests are proxied to FastAPI. When Vite runs on Windows, the proxy discovers the current WSL IP address automatically; on Linux/WSL it defaults to `localhost:8000`. If automatic discovery is unavailable, set `VITE_API_PROXY_TARGET` before starting Vite (for example, `http://172.26.188.123:8000`). To configure a direct API URL for a deployed frontend, create `frontend/.env.local`:
+
+```dotenv
+VITE_API_URL=http://localhost:8000
+```
+
+The FastAPI CORS allowlist defaults to `http://localhost:5173` and `http://127.0.0.1:5173`. Set `FRONTEND_ORIGINS` to a comma-separated list when using different local origins. Keep `ABUSEIPDB_KEY` only in the backend environment; it is not sent to the browser.
+
+### Start FastAPI
+
+Run the FastAPI backend server from the repository root:
+
+**Ubuntu on WSL 2:**
+```bash
+cd /mnt/c/Users/ASHWITH/Downloads/cis/malware
+source /home/ashwith/venvs/malware-phase5/bin/activate
+pip install -r requirements.txt
+uvicorn backend.main:app --host 0.0.0.0 --port 8000
+```
+
+**Windows PowerShell:**
+```powershell
+cd C:\Users\ASHWITH\Downloads\cis\malware
+.\venv\Scripts\Activate.ps1
+uvicorn backend.main:app --host 0.0.0.0 --port 8000
+```
+
+Check `http://localhost:8000/api/health`; interactive Swagger UI documentation is available at `http://localhost:8000/docs`. The system status endpoint performs an actual emulator readiness check when requested. It may invoke the existing `adb root` readiness step on the emulator, but it does not install or launch an APK.
+
+### Start the React development server
+
+In a separate terminal:
+
+**Ubuntu on WSL 2 / Windows:**
+```bash
+cd /mnt/c/Users/ASHWITH/Downloads/cis/malware/frontend
+npm run dev
+```
+
+**Windows PowerShell:**
+```powershell
+cd C:\Users\ASHWITH\Downloads\cis\malware\frontend
+npm run dev
+```
+
+Open `http://localhost:5173`. The app includes Overview, Analyze APK, Dynamic Analysis, Environment & Emulator, Research & Benchmarks, and About & Methodology sections. Research tables and images are loaded from an explicit allowlist of existing files in `static_outputs/` and `dynamic_outputs_v2/`; unavailable files are shown as unavailable rather than replaced with sample values.
+
+---
+
+## 📡 API Endpoints Specification
+
+FastAPI exposes typed REST endpoints documented with OpenAPI / Swagger UI at `/docs`:
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/health` | Lightweight service health probe returning status and service name. |
+| `GET` | `/api/system/status` | Environment & emulator readiness (models, ADB path, device serial, root status). |
+| `POST` | `/api/uploads` | Multipart APK upload (max 100 MiB, ZIP/APK header verification). |
+| `POST` | `/api/analyze/static` | Run static analysis (Drebin-215, RF+XGBoost ensemble, SHAP attributions, threat intel). |
+| `GET` | `/api/analysis/{analysis_id}` | Retrieve cached static analysis results by ID. |
+| `GET` | `/api/analysis/{analysis_id}/reports/{format}` | Download audit reports (`json` or `pdf` formats). |
+| `POST` | `/api/analyze/dynamic` | Queue asynchronous dynamic emulation in rooted AVD (requires explicit confirmation). |
+| `GET` | `/api/analyze/dynamic/{job_id}` | Query dynamic job state (`queued`, `running`, `completed`, `failed`). |
+| `GET` | `/api/analyze/dynamic/{job_id}/result` | Retrieve completed dynamic analysis result with syscall counts & SHAP values. |
+| `GET` | `/api/research/benchmarks` | List benchmark groups (static & dynamic) and available artifact identifiers. |
+| `GET` | `/api/research/benchmarks/tables` | Return all benchmark tabular CSV results in structured JSON format. |
+| `GET` | `/api/research/benchmarks/artifacts/{artifact_id}` | Serve benchmark plots (`image/png`) or structured data tables. |
+
+---
+
+## 🧪 Testing & Validation Procedure
+
+The project includes automated backend contract tests, Python syntax validation, and frontend production builds.
+
+### 1. Python Syntax Compilation Check
+Verify all backend source files, CLI tools, and tests compile without syntax errors:
+```powershell
+python -m py_compile app.py phase3_live_demo.py phase5_live_capture.py backend/main.py backend/reports.py backend/schemas.py backend/__init__.py tests/test_api_contract.py
+```
+
+### 2. Backend Unit & API Contract Tests
+Run the automated test suite covering API contracts, input validation, upload boundaries, and mock emulator readiness:
+```powershell
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+### 3. React Frontend Production Build
+Validate TypeScript types and compile the optimized production bundle with Vite:
+```powershell
+cd frontend
+npm run build
+```
+
+---
+
+### Analysis workflows
+
+- **Static analysis:** choose an APK in Analyze APK and explicitly start analysis. The existing `phase3_live_demo.analyze_apk` performs extraction, prediction, SHAP, and optional threat intelligence. JSON and PDF reports are available for completed results.
+- **Dynamic analysis:** first run the readiness check, select the bundled sample APK or upload one, choose 10–300 seconds, and explicitly confirm execution. The backend uses a job ID and reports actual queued/running/completed/failed status. It rejects concurrent emulator analyses. No APK is run on page load or navigation.
+- **Research:** saved experiment tables and images are served from project artifacts and are kept distinct from live model predictions.
+
+The live dynamic result is experimental: the CICMalDroid-trained model and the live emulator may differ in Android release, CPU architecture, and trace duration. A prediction is not definitive proof of malicious behavior.
+
+### WSL and ADB troubleshooting
+
+- Keep the existing `~/bin/adb` wrapper on `PATH` in the terminal that starts FastAPI.
+- Start FastAPI from the repository root so uploaded APKs are passed to the existing Windows ADB wrapper using project-relative paths; the API rejects dynamic runs when launched from another working directory.
+- Use an emulator serial (`emulator-*` or supported localhost serial). Physical devices are not accepted for API-triggered dynamic runs.
+- If readiness fails, start the existing Android Studio emulator and confirm the wrapper can run `adb devices`, `adb root`, `adb shell id`, and the required device-side `strace`/`monkey` checks.
+- Dynamic capture requires the saved `dynamic_outputs_v2/dynamic_model.joblib`. Missing files are reported; the API does not create predictions without the model.
+
+### Return to the Streamlit fallback
+
+From the repository root in Ubuntu/WSL:
+
+```bash
+source /home/ashwith/venvs/malware-phase5/bin/activate
+streamlit run app.py --server.port 8501
+```
+
+Or on Windows PowerShell:
+
+```powershell
+streamlit run app.py --server.port 8501
+```
+
