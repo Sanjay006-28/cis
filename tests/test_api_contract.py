@@ -129,6 +129,63 @@ class ApiContractTests(unittest.TestCase):
             self.assertEqual(status.emulator_checks.get("step"), "emulator")
             self.assertIn("Physical devices are rejected", status.emulator_checks.get("message", ""))
 
+    def test_get_static_analysis_returns_same_as_post_including_new_fields(self):
+        from backend.main import analyze_static, get_static_result, upload_apk
+        from backend.schemas import StaticAnalysisRequest
+        from fastapi import UploadFile
+        import asyncio
+
+        # Upload a dummy zip/apk
+        content = b"PK\x03\x04" + b"\x00" * 100
+        upload_file = UploadFile(filename="test_comparison.apk", file=io.BytesIO(content))
+        upload_resp = asyncio.run(upload_apk(upload_file))
+
+        with patch("backend.main.analyze_apk") as mock_an:
+            import pandas as pd
+            mock_an.return_value = {
+                "info": {"package": "com.test.comparison", "app_name": "TestCompare", "version_name": "1.0", "n_dex": 2},
+                "features": pd.DataFrame([[1, 0]], columns=["SEND_SMS", "CAMERA"]),
+                "static": {
+                    "verdict": "MALWARE",
+                    "prob_malware": 0.88,
+                    "evidence": [{"feature": "SEND_SMS", "present": True, "shap": 0.45}],
+                    "verdict_reason": None,
+                },
+                "ips": {"1.2.3.4": "sample string"},
+                "domains": {"evil.top": "sample context"},
+                "resolved": {},
+                "lookups": [],
+                "threat_features": {"network_risk": "LOW", "max_abuse_score": 0},
+                "lookup_error": None,
+                "urlhaus": [{"host": "evil.top", "status": "LISTED", "url_count": 3, "urlhaus_reference": "https://urlhaus.abuse.ch"}],
+                "domain_entropy": [{"domain": "evil.top", "label": "evil", "entropy": 3.5, "flag": True}],
+                "attack_candidates": [{"technique_id": "T1637.001", "technique_name": "Dynamic Resolution: DGA", "label": "candidate", "type": "heuristic", "evidence": "entropy"}],
+            }
+            req = StaticAnalysisRequest(upload_id=upload_resp.upload_id)
+            post_resp = analyze_static(req)
+
+            # Retrieve with GET
+            get_resp = get_static_result(post_resp.analysis_id)
+
+            # Verify and compare all fields
+            self.assertEqual(get_resp.analysis_id, post_resp.analysis_id)
+            self.assertEqual(get_resp.verdict, post_resp.verdict)
+            self.assertEqual(get_resp.malware_probability, post_resp.malware_probability)
+            self.assertEqual(get_resp.n_dex, post_resp.n_dex)
+            self.assertEqual(get_resp.n_dex, 2)
+            self.assertEqual(get_resp.n_active_features, post_resp.n_active_features)
+            self.assertEqual(get_resp.n_active_features, 1)
+            self.assertEqual(get_resp.urlhaus, post_resp.urlhaus)
+            self.assertTrue(len(get_resp.urlhaus) > 0)
+            self.assertEqual(get_resp.domain_entropy, post_resp.domain_entropy)
+            self.assertTrue(len(get_resp.domain_entropy) > 0)
+            self.assertEqual(get_resp.attack_candidates, post_resp.attack_candidates)
+            self.assertTrue(len(get_resp.attack_candidates) > 0)
+            self.assertEqual(get_resp.detected_features, post_resp.detected_features)
+            self.assertEqual(get_resp.evidence, post_resp.evidence)
+            self.assertEqual(get_resp.embedded_ips, post_resp.embedded_ips)
+            self.assertEqual(get_resp.embedded_domains, post_resp.embedded_domains)
+
     def test_system_status_supports_arbitrary_emulator_serial(self):
         # Do not hardcode emulator-5554: test with emulator-5556
         with patch("backend.main.resolve_adb_executable", return_value="/home/ashwith/bin/adb"), \

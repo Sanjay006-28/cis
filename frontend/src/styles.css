@@ -752,6 +752,228 @@ tbody tr:hover { background: rgb(43 62 82 / 28%); }
   flex: none;
 }
 
+/* Threat Intelligence & Explanations Styles */
+.config-group {
+  margin-top: 14px;
+  padding: 14px 16px;
+  background: #0d1724;
+  border: 1px solid #1e3044;
+  border-radius: 8px;
+}
+.config-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.config-title h3 {
+  margin: 0;
+  font-size: 13px;
+  color: #dbe7f2;
+}
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.status-pill.configured {
+  background: #10302b;
+  border: 1px solid #1f564c;
+  color: #72c4a4;
+}
+.status-pill.missing {
+  background: #2a201b;
+  border: 1px solid #573a25;
+  color: #e5a463;
+}
+.status-pill.disabled {
+  background: #192534;
+  border: 1px solid #2d3e52;
+  color: #8c9eb4;
+}
+.input-with-action {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
+}
+.input-with-action input[type="text"],
+.input-with-action input[type="password"] {
+  flex: 1;
+  background: #09111d;
+  border: 1px solid #283d54;
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: #e7edf5;
+  font-size: 12px;
+  font-family: monospace;
+}
+.input-with-action input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.badge-malware, .badge-dir-malware {
+  background: #2f1719;
+  border: 1px solid #632e33;
+  color: #f19890;
+}
+.badge-benign, .badge-dir-benign {
+  background: #102925;
+  border: 1px solid #1f5247;
+  color: #72c4a4;
+}
+.badge-neutral {
+  background: #162232;
+  border: 1px solid #2a3c50;
+  color: #92a4b8;
+}
+.badge-high {
+  background: #381517;
+  border: 1px solid #772b30;
+  color: #fca5a5;
+}
+.badge-medium {
+  background: #332014;
+  border: 1px solid #6c401f;
+  color: #fcd34d;
+}
+.badge-low {
+  background: #0f2723;
+  border: 1px solid #1e5246;
+  color: #86efac;
+}
+.badge-none {
+  background: #162232;
+  border: 1px solid #2a3c50;
+  color: #94a3b8;
+}
+
+/* Feature Explanations Accordion */
+.category-card {
+  background: #0d1724;
+  border: 1px solid #1f3044;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.category-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: #121f30;
+  cursor: pointer;
+  user-select: none;
+}
+.category-header:hover {
+  background: #17273d;
+}
+.category-header-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  font-size: 13px;
+  color: #dbe7f2;
+}
+.feature-item-card {
+  padding: 12px 16px;
+  border-top: 1px solid #1a2839;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.feature-item-card:hover {
+  background: #0e1a29;
+}
+.feature-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.feature-name {
+  font-family: monospace;
+  font-size: 12px;
+  color: #e2ecf7;
+  font-weight: 600;
+}
+.feature-desc {
+  font-size: 12px;
+  color: #a3b4c7;
+  margin: 0;
+  line-height: 1.5;
+}
+.feature-context {
+  font-size: 11px;
+  color: #7b90a6;
+  margin: 0;
+  line-height: 1.5;
+}
+.feature-interpretation {
+  font-size: 11px;
+  color: #8cabc4;
+  margin: 2px 0 0;
+  font-style: italic;
+}
+
+/* Prediction Decision Criteria Panel */
+.decision-criteria-card {
+  background: #0e1b2b;
+  border: 1px solid #22374e;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 16px 0;
+}
+.decision-criteria-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #dbe7f2;
+  margin-bottom: 8px;
+}
+.decision-criteria-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+  margin-top: 12px;
+}
+.decision-criteria-item {
+  background: #09111d;
+  border: 1px solid #1a2b3d;
+  border-radius: 6px;
+  padding: 12px 14px;
+}
+.decision-criteria-item h5 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #7f95ac;
+}
+.decision-criteria-item p {
+  margin: 0;
+  font-size: 12px;
+  color: #b3c4d7;
+  line-height: 1.5;
+}
 
 @media (max-width: 1000px) {
   .sidebar { width: 220px; }

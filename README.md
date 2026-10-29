@@ -12,10 +12,11 @@ This project delivers a production-grade defense-in-depth architecture:
 
 1. **Static Analysis Engine (Drebin-215)**: Decompiles the APK safely in-memory (manifest & DEX bytecode), extracts 215 binary permissions, intent filters, sensitive API calls, and suspicious shell commands, and evaluates them using Random Forest and XGBoost.
 2. **Soft Voting Ensemble (98.14% Accuracy)**: Fuses probabilities across tree classifiers to minimize prediction variance and maximize detection robustness.
-3. **Local Explainable AI (SHAP)**: Provides local interpretability for every analyzed APK using `shap.TreeExplainer`, detailing exact feature attributions pushing predictions toward benign or malware.
-4. **Threat Intelligence Enrichment (AbuseIPDB)**: Extracts embedded public IP addresses and domains from application bytecode and cross-references them against live cyber threat intelligence feeds.
-5. **Live Dynamic Sandbox Emulation (CICMalDroid2020 & strace)**: Automated runtime execution on a rooted Android emulator with UI monkey event fuzzing, capturing 139 Linux kernel system calls evaluated against deep learning models (TCN, BiLSTM, Transformer) and XGBoost.
-6. **Web Presentation Layer**: React, TypeScript, and Vite frontend backed by FastAPI, with the existing Streamlit dashboard retained as a fallback.
+3. **Local Explainable AI (SHAP) & Categorized Explanations**: Provides local interpretability for every analyzed APK using `shap.TreeExplainer`, paired with plain-language domain explanations, risk levels, and security context across Sensitive Permissions, Suspicious APIs, Intent Filters, and Shell Commands.
+4. **Threat Intelligence Enrichment (AbuseIPDB)**: Extracts embedded public IP addresses and domains from application bytecode, cross-references them against live cyber threat intelligence feeds, and provides an in-browser configuration panel with connection testing and transient session key support.
+5. **Live Dynamic Sandbox Emulation & Behavioral Anomalies (CICMalDroid2020 & strace)**: Automated runtime execution on a rooted Android emulator with UI monkey event fuzzing, capturing 139 Linux kernel system calls evaluated against Dynamic XGBoost and contextualized through behavioral anomaly analysis (Memory, Networking, Process Control).
+6. **Publication-Quality JSON Security Audit Reports**: Full schema-standardized audit report generation for SIEM/SOC export, capturing model parameters, local SHAP attributions, indicators, and threat intelligence with strict exclusion of credentials and API keys.
+7. **Web Presentation Layer**: React, TypeScript, and Vite frontend backed by FastAPI, with quick-start one-click launcher scripts and the existing Streamlit dashboard retained as a fallback.
 
 ---
 
@@ -137,10 +138,14 @@ Pairwise McNemar hypothesis tests with Bonferroni correction ($\alpha = 0.05/3$)
 
 ```text
 ├── app.py                                                # Existing Streamlit fallback dashboard
+├── start_web.bat                                         # All-in-one launcher for React frontend & FastAPI backend
+├── stop_servers.bat                                      # One-click script to terminate FastAPI and Vite servers
+├── start_streamlit.bat                                   # One-click launcher for the Streamlit dashboard
 ├── backend/                                              # FastAPI REST API service
 │   ├── __init__.py                                       # Package marker
 │   ├── main.py                                           # FastAPI application routes, jobs & readiness logic
-│   ├── reports.py                                        # JSON and PDF static report generators
+│   ├── explanations.py                                   # Static feature & dynamic system call explanation dictionaries
+│   ├── reports.py                                        # JSON and PDF static & dynamic security audit report generators
 │   └── schemas.py                                        # Pydantic v2 request/response schemas
 ├── frontend/                                             # Modern React + TypeScript + Vite web interface
 │   ├── index.html                                        # Single-page application entry HTML
@@ -152,9 +157,10 @@ Pairwise McNemar hypothesis tests with Bonferroni correction ($\alpha = 0.05/3$)
 │       ├── components/                                   # Layout, metric cards, state indicators
 │       ├── pages/                                        # Overview, Analyze, Dynamic, Environment, Research, About
 │       ├── types.ts                                      # TypeScript domain models and API contracts
-│       └── styles.css                                    # Design system and cybersecurity styling
-├── tests/                                                # Automated test suite
-│   └── test_api_contract.py                              # Backend API contract, readiness & validation tests
+│       └── styles.css                                    # Design system, cyber badges, and security status styling
+├── tests/                                                # Automated test suite (68 tests)
+│   ├── test_api_contract.py                              # Backend API contract, readiness & validation tests
+│   └── test_features_explanations_reports.py             # AbuseIPDB mocking, credential exclusion & report schema tests
 ├── phase3_live_demo.py                                   # Static analysis engine, feature extractor & AbuseIPDB client
 ├── phase5_live_capture.py                                # Dynamic strace capture pipeline via ADB & Android emulator
 ├── requirements.txt                                      # Python dependencies
@@ -231,7 +237,18 @@ pip install reportlab python-docx
 
 ## 🚀 Running the Application
 
-### 1. Launch the Streamlit Web Application
+### ⚡ Quick Start: One-Click Batch Launchers (Windows)
+For convenience on Windows systems, preconfigured batch scripts manage the lifecycle of both the FastAPI backend and React frontend:
+
+| Script | Purpose | Description |
+| :--- | :--- | :--- |
+| `start_web.bat` | **Start All Web Services** | Launches the FastAPI backend (`http://localhost:8000`) and React frontend (`http://localhost:5173`) in independent terminal windows. |
+| `stop_servers.bat` | **Stop All Web Services** | Terminate all active Node/Vite, Uvicorn, and Python server processes on ports 8000 and 5173. |
+| `start_streamlit.bat` | **Launch Streamlit Fallback** | Launches the original Streamlit dashboard (`http://localhost:8501`) inside the virtual environment. |
+
+---
+
+### 1. Launch the Streamlit Web Application (Manual)
 Run the dashboard using Streamlit:
 
 **Ubuntu on WSL 2:**
@@ -307,17 +324,46 @@ Generates:
 ## 🔑 Threat Intelligence (AbuseIPDB) Configuration
 
 To enable live reputation lookups for embedded public IP addresses:
-1. Register for a free API key at [AbuseIPDB](https://www.abuseipdb.com/).
-2. Provide the API key via any of the following methods:
-   - **Streamlit Sidebar**: Paste the key into the *AbuseIPDB API key* password field.
-   - **Environment Variable**:
-     ```bash
-     export ABUSEIPDB_KEY="your_api_key_here"
-     ```
-     *(In Windows PowerShell: `$env:ABUSEIPDB_KEY="your_api_key_here"`)*
-   - **CLI flag**: Pass `--key your_api_key_here` when running `phase3_live_demo.py`.
 
-*Note: API keys are handled strictly in memory and are never written to disk, logged, or exported into audit JSON reports.*
+1. Register for a free API key at [AbuseIPDB](https://www.abuseipdb.com/).
+2. Configure the key exclusively through your local root `.env` file (never entered through the browser):
+
+### Setting Up Your Local `.env` File
+
+Copy the template to create `.env` only if it does not already exist:
+
+**Windows PowerShell:**
+```powershell
+if (-not (Test-Path .env)) {
+    Copy-Item .env.example .env
+}
+```
+
+**Linux / macOS / WSL:**
+```bash
+if [ ! -f .env ]; then
+    cp .env.example .env
+fi
+```
+
+3. Open the root `.env` file in your preferred text editor.
+4. Replace the placeholder value with your actual AbuseIPDB API key:
+   ```dotenv
+   ABUSEIPDB_API_KEY=your_actual_abuseipdb_api_key_here
+   ```
+   *(Note: The backward-compatible variable `ABUSEIPDB_KEY` is also supported, but `ABUSEIPDB_API_KEY` is preferred.)*
+5. Save the file.
+6. Restart the FastAPI backend (`run.bat` or `backend_server.bat`).
+7. Open the **Analyze APK** page in the React dashboard. The AbuseIPDB panel will display `API key configured`.
+8. Click **Test Connection** to verify your key against the live AbuseIPDB service (queries `1.1.1.1` via the backend).
+
+> [!WARNING]
+> **Credential Safety & Security Hygiene**:
+> - Never commit `.env` or share your API key publicly.
+> - Never upload `.env` to GitHub or include it in screenshots or bug reports.
+> - `.gitignore` is configured to ignore `.env` and `.env.*` while preserving `.env.example`.
+> - The API key is loaded strictly backend-side and is **never** sent to the browser, logged, or exported into downloadable JSON or PDF audit reports.
+> - If no key is configured, the backend starts normally, and static APK analysis continues to work seamlessly without threat-intelligence lookups.
 
 ---
 
@@ -408,13 +454,16 @@ FastAPI exposes typed REST endpoints documented with OpenAPI / Swagger UI at `/d
 | :--- | :--- | :--- |
 | `GET` | `/api/health` | Lightweight service health probe returning status and service name. |
 | `GET` | `/api/system/status` | Environment & emulator readiness (models, ADB path, device serial, root status). |
+| `GET` | `/api/threat-intel/status` | Check if AbuseIPDB API key is preconfigured in the server environment (`env` or `none`). |
+| `POST` | `/api/threat-intel/test-key` | Test an AbuseIPDB key with a live probe; returns 200 on success, 401 on invalid key, 429 on rate limit. |
 | `POST` | `/api/uploads` | Multipart APK upload (max 100 MiB, ZIP/APK header verification). |
-| `POST` | `/api/analyze/static` | Run static analysis (Drebin-215, RF+XGBoost ensemble, SHAP attributions, threat intel). |
+| `POST` | `/api/analyze/static` | Run static analysis (Drebin-215, RF+XGBoost ensemble, SHAP attributions, threat intel, categorized explanations). |
 | `GET` | `/api/analysis/{analysis_id}` | Retrieve cached static analysis results by ID. |
-| `GET` | `/api/analysis/{analysis_id}/reports/{format}` | Download audit reports (`json` or `pdf` formats). |
+| `GET` | `/api/analysis/{analysis_id}/reports/{format}` | Download static security audit report (`json` or `pdf` formats). |
 | `POST` | `/api/analyze/dynamic` | Queue asynchronous dynamic emulation in rooted AVD (requires explicit confirmation). |
 | `GET` | `/api/analyze/dynamic/{job_id}` | Query dynamic job state (`queued`, `running`, `completed`, `failed`). |
-| `GET` | `/api/analyze/dynamic/{job_id}/result` | Retrieve completed dynamic analysis result with syscall counts & SHAP values. |
+| `GET` | `/api/analyze/dynamic/{job_id}/result` | Retrieve completed dynamic analysis result with syscall counts, SHAP values, and behavioral anomalies. |
+| `GET` | `/api/analyze/dynamic/{job_id}/report/{format}` | Download dynamic execution security audit report (`json` format). |
 | `GET` | `/api/research/benchmarks` | List benchmark groups (static & dynamic) and available artifact identifiers. |
 | `GET` | `/api/research/benchmarks/tables` | Return all benchmark tabular CSV results in structured JSON format. |
 | `GET` | `/api/research/benchmarks/artifacts/{artifact_id}` | Serve benchmark plots (`image/png`) or structured data tables. |
@@ -423,18 +472,27 @@ FastAPI exposes typed REST endpoints documented with OpenAPI / Swagger UI at `/d
 
 ## 🧪 Testing & Validation Procedure
 
-The project includes automated backend contract tests, Python syntax validation, and frontend production builds.
+The project includes an automated test suite of **68 unit and integration tests**, Python syntax validation, and frontend production builds.
 
 ### 1. Python Syntax Compilation Check
 Verify all backend source files, CLI tools, and tests compile without syntax errors:
 ```powershell
-python -m py_compile app.py phase3_live_demo.py phase5_live_capture.py backend/main.py backend/reports.py backend/schemas.py backend/__init__.py tests/test_api_contract.py
+python -m py_compile app.py phase3_live_demo.py phase5_live_capture.py backend/main.py backend/reports.py backend/schemas.py backend/explanations.py backend/__init__.py tests/test_api_contract.py tests/test_features_explanations_reports.py
 ```
 
-### 2. Backend Unit & API Contract Tests
-Run the automated test suite covering API contracts, input validation, upload boundaries, and mock emulator readiness:
+### 2. Backend Unit & Regression Test Suite (68 Tests)
+Run the full test suite covering API contracts, AbuseIPDB mocking (success, 401, 429, timeout), credential sanitization, JSON schema compliance, and dynamic anomaly classifications:
 ```powershell
 python -m unittest discover -s tests -p "test_*.py"
+```
+
+To run individual test modules:
+```powershell
+# API contract & validation tests (15 tests)
+python -m unittest tests/test_api_contract.py
+
+# Threat intelligence, explanations & report tests (53 tests)
+python -m unittest tests/test_features_explanations_reports.py
 ```
 
 ### 3. React Frontend Production Build

@@ -38,6 +38,26 @@ from phase3_live_demo import analyze_apk, INTENT_FEATURES, COMMAND_FEATURES
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 
+# Load root .env file if present
+_DOTENV_PATH = BASE_DIR / ".env"
+try:
+    from dotenv import load_dotenv
+    if _DOTENV_PATH.is_file():
+        load_dotenv(dotenv_path=_DOTENV_PATH, override=False)
+except ImportError:
+    if _DOTENV_PATH.is_file():
+        try:
+            with open(_DOTENV_PATH, "r", encoding="utf-8") as _f:
+                for _line in _f:
+                    _line = _line.strip()
+                    if _line and not _line.startswith("#") and "=" in _line:
+                        _k, _v = _line.split("=", 1)
+                        _k, _v = _k.strip(), _v.strip().strip("'\"")
+                        if _k and _k not in os.environ:
+                            os.environ[_k] = _v
+        except Exception:
+            pass
+
 STATIC_DIR   = BASE_DIR / "static_outputs"
 DYNAMIC_DIR  = BASE_DIR / "dynamic_outputs_v2"
 SAMPLE_APK   = BASE_DIR / "sample_app.apk"
@@ -519,8 +539,13 @@ with st.sidebar:
         "AbuseIPDB API key", type="password",
         help="Used only to query AbuseIPDB. Never stored or logged.",
     )
-    # Resolve the effective key: user input first, then env var
-    abuse_key = api_key_input.strip() or os.environ.get("ABUSEIPDB_KEY", "").strip() or None
+    # Resolve the effective key: user input first, then env vars (.env)
+    abuse_key = (
+        api_key_input.strip()
+        or os.environ.get("ABUSEIPDB_API_KEY", "").strip()
+        or os.environ.get("ABUSEIPDB_KEY", "").strip()
+        or None
+    )
 
     resolve_domains = st.checkbox(
         "Resolve domains to IPs and check them",
@@ -1025,10 +1050,32 @@ if active_page == "Analyze APK":
         else:
             st.caption("Embedded domains: 0")
 
+        # MITRE ATT&CK Candidate Techniques
+        attack_candidates = result.get("attack_candidates", [])
+        if attack_candidates:
+            st.markdown("#### MITRE ATT&CK Candidate Techniques *(heuristic / candidate)*")
+            df_attack = pd.DataFrame(attack_candidates)
+            st.dataframe(df_attack[["technique_id", "technique_name", "evidence"]], use_container_width=True)
+
+        # Domain Shannon Entropy Analysis
+        domain_entropy = result.get("domain_entropy", [])
+        if domain_entropy:
+            st.markdown("#### Domain Shannon Entropy *(heuristic / candidate)*")
+            st.caption("Threshold: entropy > 3.4 flags DGA candidate. Note: labels with fewer than 11 distinct characters cannot exceed 3.4.")
+            df_entropy = pd.DataFrame(domain_entropy)
+            st.dataframe(df_entropy, use_container_width=True)
+
+        # URLhaus Threat Intelligence
+        urlhaus = result.get("urlhaus", [])
+        if urlhaus:
+            st.markdown("#### URLhaus Threat Intelligence *(abuse.ch, heuristic / candidate)*")
+            df_urlhaus = pd.DataFrame(urlhaus)
+            st.dataframe(df_urlhaus, use_container_width=True)
+
         st.markdown("---")
 
         # 5. Download report
-        st.subheader("F. Export Report")
+        st.subheader("G. Export Report")
         col_dl_json, col_dl_pdf = st.columns(2)
         with col_dl_json:
             st.download_button(

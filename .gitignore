@@ -3,6 +3,8 @@ app_env/
 venv/
 env/
 .env
+.env.*
+!.env.example
 
 # Python cache & build artefacts
 __pycache__/

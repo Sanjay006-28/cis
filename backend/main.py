@@ -16,18 +16,32 @@ from fastapi import FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
-from backend.reports import build_static_json_report, build_static_pdf_report
+from backend.explanations import (
+    explain_dynamic_syscall,
+    explain_static_feature,
+)
+from backend.reports import (
+    build_dynamic_json_report,
+    build_static_csv_report,
+    build_static_json_report,
+    build_static_pdf_report,
+)
 from backend.schemas import (
     DynamicAnalysisAccepted,
     DynamicAnalysisRequest,
     DynamicAnalysisResult,
+    DynamicAnomalyExplanation,
     DynamicJobStatus,
     HealthResponse,
     ResearchGroup,
     ResearchTableResponse,
     StaticAnalysisRequest,
     StaticAnalysisResponse,
+    StaticFeatureExplanation,
     SystemStatusResponse,
+    ThreatIntelStatusResponse,
+    ThreatIntelTestRequest,
+    ThreatIntelTestResponse,
     UploadResponse,
 )
 
@@ -38,16 +52,60 @@ UPLOAD_DIR = BASE_DIR / ".api_uploads"
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 UPLOAD_TTL = timedelta(hours=1)
 
+# ---------------------------------------------------------------------------
+# Load root .env file securely before reading API key configuration
+# ---------------------------------------------------------------------------
+DOTENV_PATH = BASE_DIR / ".env"
+try:
+    from dotenv import load_dotenv
+    if DOTENV_PATH.is_file():
+        load_dotenv(dotenv_path=DOTENV_PATH, override=False)
+except ImportError:
+    if DOTENV_PATH.is_file():
+        try:
+            with open(DOTENV_PATH, "r", encoding="utf-8") as _f:
+                for _line in _f:
+                    _line = _line.strip()
+                    if _line and not _line.startswith("#") and "=" in _line:
+                        _k, _v = _line.split("=", 1)
+                        _k, _v = _k.strip(), _v.strip().strip("'\"")
+                        if _k and _k not in os.environ:
+                            os.environ[_k] = _v
+        except Exception:
+            pass
+
 os.environ.setdefault("MPLBACKEND", "Agg")
 import sys
 
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from phase3_live_demo import analyze_apk
+from phase3_live_demo import analyze_apk, check_ip
 import phase5_live_capture as dynamic_engine
 
 dynamic_engine.BUNDLE_PATH = str(DYNAMIC_MODEL)
+
+# Sentinel placeholder values that should not be treated as real API keys
+_PLACEHOLDER_KEYS = {
+    "PASTE_YOUR_ACTUAL_ABUSEIPDB_KEY_HERE",
+    "YOUR_API_KEY_HERE",
+    "YOUR_ABUSEIPDB_API_KEY_HERE",
+    "PLACEHOLDER",
+}
+
+
+def get_configured_abuseipdb_key() -> str | None:
+    """Discover the AbuseIPDB API key from backend environment configuration.
+
+    Primary environment variable: ABUSEIPDB_API_KEY (configured in root .env).
+    Backward-compatible fallback: ABUSEIPDB_KEY.
+    """
+    key = os.environ.get("ABUSEIPDB_API_KEY") or os.environ.get("ABUSEIPDB_KEY")
+    if key and key.strip():
+        cleaned = key.strip()
+        if cleaned not in _PLACEHOLDER_KEYS:
+            return cleaned
+    return None
 
 
 def _ensure_in_path(executable_path: str) -> None:
@@ -459,16 +517,96 @@ async def upload_apk(file: UploadFile = File(...)) -> UploadResponse:
     )
 
 
+@app.get("/api/threat-intel/status", response_model=ThreatIntelStatusResponse)
+def threat_intel_status_endpoint() -> ThreatIntelStatusResponse:
+    env_key = get_configured_abuseipdb_key()
+    if env_key:
+        return ThreatIntelStatusResponse(
+            configured=True,
+            source="env",
+            message="AbuseIPDB API key is configured in backend environment (via .env).",
+        )
+    return ThreatIntelStatusResponse(
+        configured=False,
+        source="none",
+        message="AbuseIPDB API key is not configured. Add ABUSEIPDB_API_KEY to your local .env file and restart the backend.",
+    )
+
+
+@app.post("/api/threat-intel/test-key", response_model=ThreatIntelTestResponse)
+def test_threat_intel_key(body: ThreatIntelTestRequest | None = None) -> ThreatIntelTestResponse:
+    # Key is read exclusively from backend environment (.env), never from request
+    key = get_configured_abuseipdb_key()
+
+    if not key:
+        return ThreatIntelTestResponse(
+            success=False,
+            status_code=400,
+            message="No AbuseIPDB API key configured in backend. Please set ABUSEIPDB_API_KEY in the root .env file and restart the backend.",
+            sample_result=None,
+        )
+
+    try:
+        res = check_ip("1.1.1.1", api_key=key, timeout=5)
+        if res.get("status") in ("checked", "success"):
+            sample = {
+                "ip": res.get("ip"),
+                "abuse_score": res.get("abuse_score"),
+                "total_reports": res.get("total_reports"),
+                "country": res.get("country"),
+                "isp": res.get("isp"),
+                "status": "checked",
+            }
+            return ThreatIntelTestResponse(
+                success=True,
+                status_code=200,
+                message="AbuseIPDB connection test succeeded using configured .env key.",
+                sample_result=sample,
+            )
+        else:
+            return ThreatIntelTestResponse(
+                success=False,
+                status_code=400,
+                message=f"AbuseIPDB test returned status: {res.get('status')}",
+                sample_result=None,
+            )
+    except Exception as exc:
+        err_msg = str(exc)
+        if key in err_msg:
+            err_msg = err_msg.replace(key, "[REDACTED]")
+        status_code = 401 if ("401" in err_msg or "rejected" in err_msg.lower()) else \
+                      429 if ("429" in err_msg or "rate limit" in err_msg.lower()) else 400
+        return ThreatIntelTestResponse(
+            success=False,
+            status_code=status_code,
+            message=f"AbuseIPDB connection test failed: {err_msg}",
+            sample_result=None,
+        )
+
+
 @app.post("/api/analyze/static", response_model=StaticAnalysisResponse)
 def analyze_static(request: StaticAnalysisRequest) -> StaticAnalysisResponse:
     if not STATIC_MODEL.is_file():
         raise HTTPException(status_code=503, detail="Static model artifact is unavailable.")
     uploaded = _take_upload(request.upload_id)
+
+    enable_threat_intel = request.enable_threat_intel
+    abuse_key = None
+    threat_intel_status = "disabled"
+    if enable_threat_intel:
+        env_key = get_configured_abuseipdb_key()
+        if env_key:
+            abuse_key = env_key
+            threat_intel_status = "configured"
+        else:
+            threat_intel_status = "missing_key"
+
     try:
         result = analyze_apk(
             str(uploaded["path"]),
-            abuse_key=os.environ.get("ABUSEIPDB_KEY"),
+            abuse_key=abuse_key,
             resolve_domains=request.resolve_domains,
+            urlhaus_key=os.environ.get("ABUSECH_AUTH_KEY"),
             model_path=str(STATIC_MODEL),
             top_n=12,
             verbose=False,
@@ -476,14 +614,36 @@ def analyze_static(request: StaticAnalysisRequest) -> StaticAnalysisResponse:
         info = result["info"]
         row = result["features"]
         detected = [str(feature) for feature in row.columns[row.iloc[0] == 1]]
+
+        shap_map = result["static"].get("shap_map") or {e["feature"]: e["shap"] for e in result["static"]["evidence"]}
+        detailed_explanations: list[StaticFeatureExplanation] = []
+        explained_keys = set()
+        for feat in detected:
+            val = shap_map.get(feat)
+            exp_data = explain_static_feature(feat, present=True, shap_value=val)
+            detailed_explanations.append(StaticFeatureExplanation(**exp_data))
+            explained_keys.add(feat)
+
+        for ev in result["static"]["evidence"]:
+            feat = ev["feature"]
+            if feat not in explained_keys:
+                exp_data = explain_static_feature(feat, present=bool(ev.get("present", False)), shap_value=ev.get("shap"))
+                detailed_explanations.append(StaticFeatureExplanation(**exp_data))
+                explained_keys.add(feat)
+
         analysis_id = str(uuid.uuid4())
         with STATE_LOCK:
             STATIC_RESULTS[analysis_id] = {
                 "result": result,
                 "filename": uploaded["filename"],
                 "sha256": uploaded["sha256"],
+                "threat_intel_status": threat_intel_status,
+                "detailed_explanations": [e.model_dump() for e in detailed_explanations],
                 "created_at": _now(),
             }
+        n_dex = int(result.get("n_dex", info.get("n_dex", 0)))
+        n_active_features = int(result.get("n_active_features", row.sum(axis=1).iloc[0]))
+        verdict_reason = result["static"].get("verdict_reason") or result["static"].get("reason")
         return StaticAnalysisResponse(
             analysis_id=analysis_id,
             filename=uploaded["filename"],
@@ -492,16 +652,26 @@ def analyze_static(request: StaticAnalysisRequest) -> StaticAnalysisResponse:
             app_name=str(info.get("app_name") or ""),
             version_name=str(info.get("version_name") or ""),
             verdict=result["static"]["verdict"],
+            verdict_reason=verdict_reason,
             malware_probability=float(result["static"]["prob_malware"]),
+            decision_threshold=0.50,
+            classifier_info="Ensemble (Random Forest + XGBoost on Drebin-215)",
             detected_features=detected,
             total_features=int(row.shape[1]),
+            n_dex=n_dex,
+            n_active_features=n_active_features,
             evidence=result["static"]["evidence"],
+            detailed_explanations=detailed_explanations,
             embedded_ips=result["ips"],
             embedded_domains=result["domains"],
             resolved_ips=result.get("resolved", {}),
             lookups=result["lookups"],
             threat_features=result.get("threat_features"),
+            threat_intel_status=threat_intel_status,
             lookup_error=result.get("lookup_error"),
+            urlhaus=result.get("urlhaus", []),
+            domain_entropy=result.get("domain_entropy", []),
+            attack_candidates=result.get("attack_candidates", []),
             notice=(
                 "This is a model prediction, not definitive proof of malicious behavior. "
                 "Embedded indicators are not captured live network traffic."
@@ -527,6 +697,14 @@ def get_static_result(analysis_id: str) -> StaticAnalysisResponse:
     result = saved["result"]
     info = result["info"]
     row = result["features"]
+    raw_explanations = saved.get("detailed_explanations", [])
+    detailed_explanations = [
+        StaticFeatureExplanation(**e) if isinstance(e, dict) else e
+        for e in raw_explanations
+    ]
+    n_dex = int(result.get("n_dex", info.get("n_dex", 0)))
+    n_active_features = int(result.get("n_active_features", row.sum(axis=1).iloc[0]))
+    verdict_reason = result["static"].get("verdict_reason") or result["static"].get("reason")
     return StaticAnalysisResponse(
         analysis_id=analysis_id,
         filename=saved["filename"],
@@ -535,16 +713,26 @@ def get_static_result(analysis_id: str) -> StaticAnalysisResponse:
         app_name=str(info.get("app_name") or ""),
         version_name=str(info.get("version_name") or ""),
         verdict=result["static"]["verdict"],
+        verdict_reason=verdict_reason,
         malware_probability=float(result["static"]["prob_malware"]),
+        decision_threshold=0.50,
+        classifier_info="Ensemble (Random Forest + XGBoost on Drebin-215)",
         detected_features=[str(feature) for feature in row.columns[row.iloc[0] == 1]],
         total_features=int(row.shape[1]),
+        n_dex=n_dex,
+        n_active_features=n_active_features,
         evidence=result["static"]["evidence"],
+        detailed_explanations=detailed_explanations,
         embedded_ips=result["ips"],
         embedded_domains=result["domains"],
         resolved_ips=result.get("resolved", {}),
         lookups=result["lookups"],
         threat_features=result.get("threat_features"),
+        threat_intel_status=saved.get("threat_intel_status", "skipped"),
         lookup_error=result.get("lookup_error"),
+        urlhaus=result.get("urlhaus", []),
+        domain_entropy=result.get("domain_entropy", []),
+        attack_candidates=result.get("attack_candidates", []),
         notice=(
             "This is a model prediction, not definitive proof of malicious behavior. "
             "Embedded indicators are not captured live network traffic."
@@ -559,19 +747,47 @@ def download_static_report(analysis_id: str, format: str) -> Response:
     if saved is None:
         raise HTTPException(status_code=404, detail="Static analysis result not found.")
     result = saved["result"]
+    filename = saved.get("filename", "apk")
+    clean_stem = re.sub(r'[^a-zA-Z0-9_\-]', '_', Path(filename).stem) or "apk"
     if format == "json":
+        json_bytes = build_static_json_report(
+            result,
+            filename=saved.get("filename"),
+            sha256=saved.get("sha256"),
+            analysis_id=analysis_id,
+            threat_intel_status=saved.get("threat_intel_status", "skipped"),
+        )
         return Response(
-            content=build_static_json_report(result),
+            content=json_bytes,
             media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{analysis_id}.json"'},
+            headers={"Content-Disposition": f'attachment; filename="{clean_stem}_analysis_report.json"'},
         )
     if format == "pdf":
-        return Response(
-            content=build_static_pdf_report(result),
-            media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{analysis_id}.pdf"'},
+        pdf_bytes = build_static_pdf_report(
+            result,
+            filename=saved.get("filename"),
+            sha256=saved.get("sha256"),
+            analysis_id=analysis_id,
         )
-    raise HTTPException(status_code=404, detail="Supported report formats are json and pdf.")
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{clean_stem}_security_report.pdf"'},
+        )
+    if format == "csv":
+        csv_bytes = build_static_csv_report(
+            result,
+            filename=saved.get("filename"),
+            sha256=saved.get("sha256"),
+            analysis_id=analysis_id,
+            threat_intel_status=saved.get("threat_intel_status", "skipped"),
+        )
+        return Response(
+            content=csv_bytes,
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{clean_stem}_analysis_report.csv"'},
+        )
+    raise HTTPException(status_code=404, detail="Supported report formats are json, pdf, and csv.")
 
 
 def _run_dynamic_job(job_id: str, apk_path: Path, filename: str, digest: str,
@@ -607,6 +823,23 @@ def _run_dynamic_job(job_id: str, apk_path: Path, filename: str, digest: str,
             {"syscall": str(row[0]), "count": float(row[1]), "shap": float(row[2])}
             for row in prediction.get("evidence", [])
         ]
+        evidence_shap_map = {str(row[0]): float(row[2]) for row in prediction.get("evidence", [])}
+
+        behavioral_anomalies: list[DynamicAnomalyExplanation] = []
+        explained_syscalls = set()
+        for ev in evidence:
+            sc = ev["syscall"]
+            cnt = int(counts.get(sc, ev["count"]))
+            anomaly_data = explain_dynamic_syscall(sc, count=cnt, shap_value=ev["shap"])
+            behavioral_anomalies.append(DynamicAnomalyExplanation(**anomaly_data))
+            explained_syscalls.add(sc)
+
+        for sc, cnt in sorted(counts.items(), key=lambda x: x[1], reverse=True)[:15]:
+            if sc not in explained_syscalls:
+                anomaly_data = explain_dynamic_syscall(sc, count=cnt, shap_value=evidence_shap_map.get(sc))
+                behavioral_anomalies.append(DynamicAnomalyExplanation(**anomaly_data))
+                explained_syscalls.add(sc)
+
         result = DynamicAnalysisResult(
             job_id=job_id,
             filename=filename,
@@ -614,6 +847,8 @@ def _run_dynamic_job(job_id: str, apk_path: Path, filename: str, digest: str,
             package=str(capture["package"]),
             requested_seconds=seconds,
             actual_seconds=float(capture["seconds"]),
+            decision_threshold=0.50,
+            classifier_info="Dynamic XGBoost (Normalized Syscall Shares on CICMalDroid2020)",
             counts=counts,
             mapped_counts={str(k): int(v) for k, v in output["mapped"].items()},
             unmapped_counts={str(k): int(v) for k, v in output["unmapped"].items()},
@@ -623,6 +858,7 @@ def _run_dynamic_job(job_id: str, apk_path: Path, filename: str, digest: str,
             probability_normalized_shares=float(prediction["shares"]),
             probability_raw_counts=float(prediction["counts"]),
             shap_evidence=evidence,
+            behavioral_anomalies=behavioral_anomalies,
             raw_report=str(capture.get("raw_text", "")),
             notice=(
                 "A model prediction is not definitive proof of malicious behavior. "
@@ -748,6 +984,27 @@ def dynamic_job_result(job_id: str) -> DynamicAnalysisResult:
         if job["status"] != "completed" or not job["result"]:
             raise HTTPException(status_code=409, detail=f"Job result is not ready (status: {job['status']}).")
         return DynamicAnalysisResult(**job["result"])
+
+
+@app.get("/api/analyze/dynamic/{job_id}/reports/{format}")
+def download_dynamic_report(job_id: str, format: str) -> Response:
+    with STATE_LOCK:
+        job = DYNAMIC_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Dynamic analysis job not found.")
+    if job["status"] != "completed" or not job.get("result"):
+        raise HTTPException(status_code=409, detail=f"Job report is not ready (status: {job['status']}).")
+    result = job["result"]
+    filename = job.get("filename", "apk")
+    clean_stem = re.sub(r'[^a-zA-Z0-9_\-]', '_', Path(filename).stem) or "apk"
+    if format == "json":
+        json_bytes = build_dynamic_json_report(result, job_info=job)
+        return Response(
+            content=json_bytes,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{clean_stem}_dynamic_report.json"'},
+        )
+    raise HTTPException(status_code=404, detail="Supported dynamic report format is json.")
 
 
 @app.get("/api/research/benchmarks", response_model=list[ResearchGroup])

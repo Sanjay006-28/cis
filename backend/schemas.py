@@ -15,9 +15,73 @@ class UploadResponse(BaseModel):
     sha256: str
 
 
+class ThreatIntelStatusResponse(BaseModel):
+    configured: bool
+    source: Literal["env", "none"]
+    message: str = ""
+
+
+class ThreatIntelTestRequest(BaseModel):
+    model_config = {"extra": "ignore"}
+
+
+class ThreatIntelTestResponse(BaseModel):
+    success: bool
+    status_code: int
+    message: str
+    sample_result: dict[str, Any] | None = None
+
+
+class StaticFeatureExplanation(BaseModel):
+    feature: str
+    category: str
+    present: bool
+    shap: float | None = None
+    direction: str
+    risk_level: str
+    description: str
+    security_context: str
+    interpretation: str
+
+
+class DynamicAnomalyExplanation(BaseModel):
+    syscall: str
+    count: int
+    category: str
+    shap: float | None = None
+    direction: str
+    description: str
+    investigation_reason: str
+    benign_context: str
+    interpretation: str
+
+
 class StaticAnalysisRequest(BaseModel):
     upload_id: str
     resolve_domains: bool = False
+    enable_threat_intel: bool = True
+
+
+STATIC_CSV_COLUMNS: list[str] = [
+    "analysis_id",
+    "filename",
+    "sha256",
+    "package_name",
+    "app_name",
+    "version_name",
+    "verdict",
+    "verdict_reason",
+    "malware_probability",
+    "decision_threshold",
+    "classifier",
+    "n_dex",
+    "n_active_features",
+    "total_features",
+    "network_risk",
+    "max_abuse_score",
+    "malicious_ip_count",
+    "timestamp",
+]
 
 
 class StaticAnalysisResponse(BaseModel):
@@ -28,17 +92,27 @@ class StaticAnalysisResponse(BaseModel):
     app_name: str
     version_name: str
     verdict: str
+    verdict_reason: str | None = None
     malware_probability: float = Field(ge=0, le=1)
+    decision_threshold: float = 0.50
+    classifier_info: str = "Ensemble (Random Forest + XGBoost on Drebin-215)"
     detected_features: list[str]
     total_features: int
+    n_dex: int = 0
+    n_active_features: int = 0
     evidence: list[dict[str, Any]]
+    detailed_explanations: list[StaticFeatureExplanation] = Field(default_factory=list)
     embedded_ips: dict[str, str]
     embedded_domains: dict[str, str]
     resolved_ips: dict[str, str]
     lookups: list[dict[str, Any]]
     threat_features: dict[str, Any] | None
+    threat_intel_status: str = "skipped"
     lookup_error: str | None
     notice: str
+    urlhaus: list[dict[str, Any]] = Field(default_factory=list)
+    domain_entropy: list[dict[str, Any]] = Field(default_factory=list)
+    attack_candidates: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class DynamicAnalysisRequest(BaseModel):
@@ -72,6 +146,8 @@ class DynamicAnalysisResult(BaseModel):
     package: str
     requested_seconds: int
     actual_seconds: float
+    decision_threshold: float = 0.50
+    classifier_info: str = "Dynamic XGBoost (Normalized Syscall Shares on CICMalDroid2020)"
     counts: dict[str, int]
     mapped_counts: dict[str, int]
     unmapped_counts: dict[str, int]
@@ -81,6 +157,7 @@ class DynamicAnalysisResult(BaseModel):
     probability_normalized_shares: float = Field(ge=0, le=1)
     probability_raw_counts: float = Field(ge=0, le=1)
     shap_evidence: list[dict[str, Any]]
+    behavioral_anomalies: list[DynamicAnomalyExplanation] = Field(default_factory=list)
     raw_report: str
     notice: str
 

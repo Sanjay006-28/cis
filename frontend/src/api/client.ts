@@ -7,6 +7,8 @@ import type {
   ResearchTable,
   StaticResult,
   SystemStatus,
+  ThreatIntelStatus,
+  ThreatIntelTestResult,
   UploadReceipt,
 } from "../types";
 
@@ -46,11 +48,29 @@ export async function uploadApk(file: File) {
   return request<UploadReceipt>("/api/uploads", { method: "POST", body });
 }
 
-export function analyzeStatic(uploadId: string, resolveDomains: boolean) {
+export function getThreatIntelStatus() {
+  return request<ThreatIntelStatus>("/api/threat-intel/status");
+}
+
+export function testThreatIntelKey() {
+  return request<ThreatIntelTestResult>("/api/threat-intel/test-key", {
+    method: "POST",
+  });
+}
+
+export function analyzeStatic(
+  uploadId: string,
+  resolveDomains: boolean,
+  enableThreatIntel: boolean = true,
+) {
   return request<StaticResult>("/api/analyze/static", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ upload_id: uploadId, resolve_domains: resolveDomains }),
+    body: JSON.stringify({
+      upload_id: uploadId,
+      resolve_domains: resolveDomains,
+      enable_threat_intel: enableThreatIntel,
+    }),
   });
 }
 
@@ -91,10 +111,47 @@ export function getBenchmarkTable(artifactId: string) {
   );
 }
 
-export function reportUrl(analysisId: string, format: "json" | "pdf") {
+export function reportUrl(analysisId: string, format: "json" | "pdf" | "csv") {
   return `${API_BASE}/api/analysis/${encodeURIComponent(analysisId)}/reports/${format}`;
+}
+
+export function dynamicReportUrl(jobId: string, format: "json" = "json") {
+  return `${API_BASE}/api/analyze/dynamic/${encodeURIComponent(jobId)}/reports/${format}`;
 }
 
 export function benchmarkArtifactUrl(artifactId: string) {
   return `${API_BASE}/api/research/benchmarks/artifacts/${encodeURIComponent(artifactId)}`;
+}
+
+export async function downloadReportFile(url: string, fallbackFilename: string): Promise<void> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    let errorDetail = `Download failed (${response.status})`;
+    try {
+      const errJson = await response.json();
+      if (errJson && errJson.detail) errorDetail = errJson.detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(errorDetail);
+  }
+
+  let filename = fallbackFilename;
+  const disposition = response.headers.get("Content-Disposition");
+  if (disposition && disposition.includes("filename=")) {
+    const match = disposition.match(/filename=["']?([^"';]+)["']?/);
+    if (match && match[1]) {
+      filename = match[1].trim();
+    }
+  }
+
+  const blob = await response.blob();
+  const blobUrl = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = blobUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  window.URL.revokeObjectURL(blobUrl);
 }

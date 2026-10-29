@@ -12,10 +12,14 @@ import re
 import socket
 import ipaddress
 import logging
+import math
+import collections
 import warnings
 import numpy as np
 import pandas as pd
 import joblib
+import tldextract
+from pathlib import Path
 
 warnings.filterwarnings("ignore")
 logging.disable(logging.CRITICAL)
@@ -25,12 +29,35 @@ try:                                   # androguard logs a lot through loguru
 except Exception:
     pass
 
+# Load root .env file if present
+_DOTENV_PATH = Path(__file__).resolve().parent / ".env"
+try:
+    from dotenv import load_dotenv
+    if _DOTENV_PATH.is_file():
+        load_dotenv(dotenv_path=_DOTENV_PATH, override=False)
+except ImportError:
+    if _DOTENV_PATH.is_file():
+        try:
+            with open(_DOTENV_PATH, "r", encoding="utf-8") as _f:
+                for _line in _f:
+                    _line = _line.strip()
+                    if _line and not _line.startswith("#") and "=" in _line:
+                        _k, _v = _line.split("=", 1)
+                        _k, _v = _k.strip(), _v.strip().strip("'\"")
+                        if _k and _k not in os.environ:
+                            os.environ[_k] = _v
+        except Exception:
+            pass
+
 # -----------------------------------------------------------------------------
 # >>> SETTINGS <<<
 # -----------------------------------------------------------------------------
 STATIC_MODEL_PATH = "static_outputs/static_model.joblib"   # saved by phase1_static.py
 ABUSE_API = "https://api.abuseipdb.com/api/v2"
 MALICIOUS_THRESHOLD = 50       # AbuseIPDB confidence score >= 50 counts as "malicious IP"
+ENTROPY_THRESHOLD = 3.4        # Shannon entropy > 3.4 flags DGA candidate domain label
+URLHAUS_API_ENDPOINT = "https://urlhaus-api.abuse.ch/v1/host/"
+_TLD_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=())
 
 # --- Feature groups of the Drebin-215 dataset (used to decide HOW to look for each feature)
 INTENT_FEATURES = {
@@ -181,7 +208,7 @@ def load_static_model(path=STATIC_MODEL_PATH):
     return _MODEL_CACHE[path]
 
 
-def predict_static(row, bundle, top_n=8):
+def predict_static(row, bundle, top_n=8, n_dex=None):
     p_rf = bundle["rf"].predict_proba(row)[:, 1]
     p_xgb = bundle["xgb"].predict_proba(row)[:, 1]
     prob = float((p_rf + p_xgb)[0] / 2)                               # same fusion as Phase 1
@@ -189,7 +216,29 @@ def predict_static(row, bundle, top_n=8):
     order = np.argsort(-np.abs(sv))[:top_n]
     evidence = [{"feature": row.columns[i], "present": bool(row.iloc[0, i]), "shap": float(sv[i])}
                 for i in order]
-    return {"prob_malware": prob, "verdict": "MALWARE" if prob >= 0.5 else "BENIGN", "evidence": evidence}
+    shap_map = {str(row.columns[i]): float(sv[i]) for i in range(len(row.columns))}
+
+    n_active = int(row.sum(axis=1).iloc[0]) if hasattr(row, "sum") else 0
+    verdict_reason = None
+    if n_dex is not None and n_dex == 0:
+        verdict = "UNKNOWN"
+        verdict_reason = "APK contains no compiled DEX code (n_dex=0); static classification cannot be determined reliably."
+    elif n_active == 0:
+        verdict = "UNKNOWN"
+        verdict_reason = "All 215 static features are zero (n_active_features=0); APK may be packed, encrypted, or non-functional. Verdict cannot be determined as BENIGN."
+    else:
+        verdict = "MALWARE" if prob >= 0.5 else "BENIGN"
+
+    return {
+        "prob_malware": prob,
+        "verdict": verdict,
+        "verdict_reason": verdict_reason,
+        "reason": verdict_reason,
+        "evidence": evidence,
+        "shap_map": shap_map,
+        "n_dex": n_dex,
+        "n_active_features": n_active,
+    }
 
 
 # =============================================================================
@@ -201,7 +250,7 @@ _DOMAIN = re.compile(r"^(?:[a-z0-9-]+\.)+[a-z]{2,}$")
 
 
 def extract_indicators(strings):
-    """Find public IPs and domain names embedded in an app's strings.
+    """Find public IPs (IPv4 and IPv6) and domain names embedded in an app's strings.
     Returns (ips, domains, n_ignored): dicts of indicator -> example string."""
     ips, domains, ignored = {}, {}, 0
     for s in strings:
@@ -209,18 +258,27 @@ def extract_indicators(strings):
         if not s or len(s) > 2000:
             continue
         hosts = []
+        # Check if bare string is an IP address
+        try:
+            bare_parsed = ipaddress.ip_address(s.strip("[]"))
+            if bare_parsed.is_global and not (bare_parsed.is_multicast or bare_parsed.is_private or bare_parsed.is_loopback or bare_parsed.is_reserved):
+                ips.setdefault(str(bare_parsed), s[:90])
+                continue
+        except ValueError:
+            pass
+
         m = _BARE_IP.fullmatch(s)
         if m:
             hosts.append(m.group(1))
         hosts += [h.lower() for h in _URL_HOST.findall(s)]
         for h in hosts:
             try:
-                ip = ipaddress.ip_address(h)
+                ip = ipaddress.ip_address(h.strip("[]"))
             except ValueError:
                 ip = None
             if ip is not None:
-                if ip.is_global and not ip.is_multicast:              # drops 10.x, 192.168.x, 127.x, 0.0.0.0 ...
-                    ips.setdefault(h, s[:90])
+                if ip.is_global and not (ip.is_multicast or ip.is_private or ip.is_loopback or ip.is_reserved):
+                    ips.setdefault(str(ip), s[:90])
                 continue
             if _DOMAIN.match(h):
                 if h.endswith(IGNORED_HOST_SUFFIXES):
@@ -235,7 +293,15 @@ def resolve_domain(host, timeout=3.0):
     old = socket.getdefaulttimeout()
     try:
         socket.setdefaulttimeout(timeout)
-        return sorted({a for a in socket.gethostbyname_ex(host)[2] if ipaddress.ip_address(a).is_global})
+        resolved_ips = []
+        for a in socket.gethostbyname_ex(host)[2]:
+            try:
+                ip_obj = ipaddress.ip_address(a)
+                if ip_obj.is_global and not (ip_obj.is_multicast or ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_reserved):
+                    resolved_ips.append(str(ip_obj))
+            except ValueError:
+                continue
+        return sorted(set(resolved_ips))
     except Exception:
         return []
     finally:
@@ -247,9 +313,30 @@ def resolve_domain(host, timeout=3.0):
 # =============================================================================
 def check_ip(ip, api_key, max_age_days=90, timeout=15, http_get=None):
     """Ask AbuseIPDB about one IP. `http_get` lets tests inject a fake response."""
+    # Pre-validate IP address
+    try:
+        parsed_ip = ipaddress.ip_address(ip.strip("[]"))
+    except ValueError:
+        raise ValueError(f"AbuseIPDB could not accept '{ip}' as an IP address.")
+
+    if not parsed_ip.is_global or parsed_ip.is_multicast or parsed_ip.is_private or parsed_ip.is_loopback or parsed_ip.is_reserved:
+        return {
+            "ip": ip,
+            "abuse_score": 0,
+            "total_reports": 0,
+            "country": None,
+            "isp": None,
+            "domain": None,
+            "usage_type": None,
+            "last_reported": None,
+            "status": "skipped_private",
+            "error": "IP is in a private, loopback, or reserved range.",
+        }
+
     if http_get is None:
         import requests
         http_get = requests.get
+
     r = http_get(f"{ABUSE_API}/check", headers={"Key": api_key, "Accept": "application/json"},
                  params={"ipAddress": ip, "maxAgeInDays": max_age_days}, timeout=timeout)
     if r.status_code == 429:
@@ -260,10 +347,18 @@ def check_ip(ip, api_key, max_age_days=90, timeout=15, http_get=None):
         raise ValueError(f"AbuseIPDB could not accept '{ip}' as an IP address.")
     r.raise_for_status()
     d = r.json()["data"]
-    return {"ip": ip, "abuse_score": int(d.get("abuseConfidenceScore", 0)),
-            "total_reports": int(d.get("totalReports", 0)), "country": d.get("countryCode"),
-            "isp": d.get("isp"), "domain": d.get("domain"), "usage_type": d.get("usageType"),
-            "last_reported": d.get("lastReportedAt")}
+    return {
+        "ip": ip,
+        "abuse_score": int(d.get("abuseConfidenceScore", 0)),
+        "total_reports": int(d.get("totalReports", 0)),
+        "country": d.get("countryCode"),
+        "isp": d.get("isp"),
+        "domain": d.get("domain"),
+        "usage_type": d.get("usageType"),
+        "last_reported": d.get("lastReportedAt"),
+        "status": "checked",
+        "error": None,
+    }
 
 
 def get_known_bad_ips(api_key, n=3, http_get=None):
@@ -286,7 +381,7 @@ def risk_level(max_score):
 
 def threat_intel_features(results):
     """Summarise lookup results into the 3 threat-intelligence features."""
-    scores = [r["abuse_score"] for r in results]
+    scores = [r["abuse_score"] for r in results if r.get("abuse_score") is not None and r.get("status") == "checked"]
     mx = max(scores) if scores else None
     return {"max_abuse_score": mx if mx is not None else 0,
             "malicious_ip_count": sum(s >= MALICIOUS_THRESHOLD for s in scores),
@@ -312,14 +407,243 @@ def validate_lookup(api_key, extra_ips=(), http_get=None):
 
 
 # =============================================================================
+# 5b. URLHAUS THREAT INTELLIGENCE (abuse.ch)
+# =============================================================================
+def check_urlhaus_host(host, auth_key=None, timeout=10, http_post=None):
+    """Query URLhaus API for a host (domain or IP).
+
+    POST https://urlhaus-api.abuse.ch/v1/host/ with form field host=<domain or IP>
+    and header Auth-Key read from env ABUSECH_AUTH_KEY or passed auth_key.
+
+    Returns:
+      - LISTED (with url_count): query_status == "ok"
+      - NOT_LISTED: query_status == "no_results"
+      - UNAVAILABLE: no key, timeout, HTTP error, or any other query_status.
+
+    Critical safety rules:
+      - An error must NEVER be reported as not listed or clean.
+      - Timeout is 10 seconds.
+      - Never print, log, store or export the key.
+    """
+    key = auth_key or os.environ.get("ABUSECH_AUTH_KEY")
+    if not key or not str(key).strip():
+        return {
+            "status": "UNAVAILABLE",
+            "host": host,
+            "error": "No Auth-Key provided or configured in ABUSECH_AUTH_KEY environment variable",
+        }
+
+    headers = {"Auth-Key": str(key).strip()}
+    data = {"host": host}
+
+    if http_post is None:
+        import requests
+        http_post = requests.post
+
+    try:
+        r = http_post(URLHAUS_API_ENDPOINT, data=data, headers=headers, timeout=timeout)
+    except Exception as exc:
+        return {
+            "status": "UNAVAILABLE",
+            "host": host,
+            "error": f"Request failed: {exc}",
+        }
+
+    if r.status_code != 200:
+        return {
+            "status": "UNAVAILABLE",
+            "host": host,
+            "error": f"HTTP {r.status_code}",
+        }
+
+    try:
+        body = r.json()
+    except Exception as exc:
+        return {
+            "status": "UNAVAILABLE",
+            "host": host,
+            "error": f"JSON decode failed: {exc}",
+        }
+
+    query_status = body.get("query_status")
+    if query_status == "ok":
+        raw_count = body.get("url_count")
+        url_count = int(raw_count if raw_count is not None else len(body.get("urls") or []))
+        return {
+            "status": "LISTED",
+            "host": host,
+            "url_count": url_count,
+            "urlhaus_reference": body.get("urlhaus_reference"),
+        }
+    elif query_status == "no_results":
+        return {
+            "status": "NOT_LISTED",
+            "host": host,
+            "url_count": 0,
+        }
+    else:
+        # Any other query_status (e.g. no_auth, invalid_host, error) MUST be reported as UNAVAILABLE
+        return {
+            "status": "UNAVAILABLE",
+            "host": host,
+            "error": f"URLhaus query status: {query_status}",
+        }
+
+
+# =============================================================================
+# 5c. SHANNON ENTROPY OF REGISTRABLE DOMAIN LABEL
+# =============================================================================
+def calculate_domain_entropy(domain_or_url):
+    """Calculate Shannon entropy of the registrable domain label using tldextract in offline mode.
+
+    Returns: label, entropy (rounded to 3 decimals), and flag = entropy > 3.4.
+
+    Theoretical note:
+    The maximum Shannon entropy for a string with k distinct characters is log2(k).
+    For k = 10 distinct characters: log2(10) ≈ 3.3219 bits < 3.4.
+    Therefore, labels with fewer than 11 distinct characters cannot exceed 3.4.
+    At least 11 distinct characters are mathematically required to exceed the 3.4 threshold.
+    """
+    try:
+        ext = _TLD_EXTRACTOR(domain_or_url)
+        label = ext.domain
+    except Exception:
+        label = domain_or_url.split(".")[0] if "." in domain_or_url else domain_or_url
+
+    if not label:
+        return {
+            "domain": domain_or_url,
+            "label": "",
+            "entropy": 0.0,
+            "flag": False,
+        }
+
+    counts = collections.Counter(label)
+    n = len(label)
+    entropy = -sum((c / n) * math.log2(c / n) for c in counts.values())
+    entropy_rounded = round(entropy, 3)
+    flag = bool(entropy_rounded > ENTROPY_THRESHOLD)
+
+    return {
+        "domain": domain_or_url,
+        "label": label,
+        "entropy": entropy_rounded,
+        "flag": flag,
+    }
+
+
+# =============================================================================
+# 5d. MITRE ATT&CK CANDIDATE MAPPING (RULE-BASED)
+# =============================================================================
+def extract_attack_candidates(info, row=None, domain_entropy=None):
+    """Rule-based MITRE ATT&CK candidate mapping. Always labelled 'candidate'.
+
+    Mappings:
+      - SEND_SMS or RECEIVE_SMS permission -> T1582 SMS Control
+      - READ_SMS permission -> T1636.004 Protected User Data: SMS Messages
+      - DexClassLoader reference -> T1407 Download New Code at Runtime
+      - entropy-flagged domain -> T1637.001 Dynamic Resolution: DGA
+
+    Negative rules:
+      - Do NOT map su/chmod strings or a bare embedded IP to any technique.
+      - Never invent data.
+      - Store the exact evidence string.
+    """
+    candidates = []
+
+    # Collect declared permissions
+    perms = set()
+    if info and "permissions" in info:
+        perms.update(info["permissions"])
+    if row is not None and hasattr(row, "columns"):
+        for p in ["SEND_SMS", "RECEIVE_SMS", "READ_SMS"]:
+            if p in row.columns and row.iloc[0][p] == 1:
+                perms.add(p)
+
+    # 1. SEND_SMS or RECEIVE_SMS permission -> T1582 SMS Control
+    sms_control_ev = []
+    if any(p.endswith("SEND_SMS") or p == "SEND_SMS" for p in perms):
+        sms_control_ev.append("Declared permission: SEND_SMS")
+    if any(p.endswith("RECEIVE_SMS") or p == "RECEIVE_SMS" for p in perms):
+        sms_control_ev.append("Declared permission: RECEIVE_SMS")
+    if sms_control_ev:
+        candidates.append({
+            "technique_id": "T1582",
+            "technique_name": "SMS Control",
+            "label": "candidate",
+            "type": "heuristic / candidate",
+            "evidence": "; ".join(sms_control_ev),
+        })
+
+    # 2. READ_SMS permission -> T1636.004 Protected User Data: SMS Messages
+    if any(p.endswith("READ_SMS") or p == "READ_SMS" for p in perms):
+        candidates.append({
+            "technique_id": "T1636.004",
+            "technique_name": "Protected User Data: SMS Messages",
+            "label": "candidate",
+            "type": "heuristic / candidate",
+            "evidence": "Declared permission: READ_SMS",
+        })
+
+    # 3. DexClassLoader reference -> T1407 Download New Code at Runtime
+    dexclass_ev = None
+    if info:
+        # Check string table
+        for s in info.get("strings", []):
+            if "DexClassLoader" in s:
+                dexclass_ev = f"DEX string reference: {s}"
+                break
+        # Check type descriptors
+        if not dexclass_ev:
+            for t in info.get("type_descs", []):
+                if "DexClassLoader" in t:
+                    dexclass_ev = f"Class reference: {t}"
+                    break
+        # Check method references
+        if not dexclass_ev:
+            for cls, m in info.get("method_refs", []):
+                if "DexClassLoader" in cls:
+                    dexclass_ev = f"Method reference: {cls}->{m}"
+                    break
+    if not dexclass_ev and row is not None and hasattr(row, "columns"):
+        for c in row.columns:
+            if "DexClassLoader" in str(c) and row.iloc[0][c] == 1:
+                dexclass_ev = f"Drebin feature present: {c}"
+                break
+    if dexclass_ev:
+        candidates.append({
+            "technique_id": "T1407",
+            "technique_name": "Download New Code at Runtime",
+            "label": "candidate",
+            "type": "heuristic / candidate",
+            "evidence": dexclass_ev,
+        })
+
+    # 4. entropy-flagged domain -> T1637.001 Dynamic Resolution: DGA
+    if domain_entropy:
+        for item in domain_entropy:
+            if item.get("flag"):
+                candidates.append({
+                    "technique_id": "T1637.001",
+                    "technique_name": "Dynamic Resolution: DGA",
+                    "label": "candidate",
+                    "type": "heuristic / candidate",
+                    "evidence": f"Domain '{item.get('domain')}' (label '{item.get('label')}') has Shannon entropy {item.get('entropy'):.3f} > 3.4",
+                })
+
+    return candidates
+
+
+# =============================================================================
 # 6. FULL ANALYSIS OF ONE APK
 # =============================================================================
-def analyze_apk(apk_path, abuse_key=None, resolve_domains=False, model_path=STATIC_MODEL_PATH,
-                top_n=8, verbose=True, http_get=None):
+def analyze_apk(apk_path, abuse_key=None, urlhaus_key=None, resolve_domains=False,
+                model_path=STATIC_MODEL_PATH, top_n=8, verbose=True,
+                http_get=None, http_post=None):
     info = extract_apk_info(apk_path)
     bundle = load_static_model(model_path)
     row = build_feature_vector(info, bundle["feature_names"])
-    static = predict_static(row, bundle, top_n=top_n)
+    static = predict_static(row, bundle, top_n=top_n, n_dex=info.get("n_dex", 0))
 
     candidates = [x for x in info["strings"] + info["manifest_strings"]
                   if x.strip() != info["version_name"]]            # a version like 2.12.9.2 is not an IP
@@ -331,17 +655,116 @@ def analyze_apk(apk_path, abuse_key=None, resolve_domains=False, model_path=STAT
                 resolved.setdefault(ip, d)
     lookups, lookup_error = [], None
     if abuse_key:
-        try:
-            for ip in list(ips) + [i for i in resolved if i not in ips]:
+        unique_ips = []
+        seen_ips = set()
+        for ip in list(ips) + [i for i in resolved if i not in ips]:
+            if ip not in seen_ips:
+                seen_ips.add(ip)
+                unique_ips.append(ip)
+
+        for ip in unique_ips:
+            try:
                 res = check_ip(ip, abuse_key, http_get=http_get)
                 res["source"] = ips.get(ip, f"resolved from {resolved.get(ip)}")
                 lookups.append(res)
-        except Exception as e:
-            lookup_error = str(e)
+            except RuntimeError as e:
+                # Fatal authentication or rate limit errors
+                lookup_error = str(e)
+                lookups.append({
+                    "ip": ip,
+                    "abuse_score": None,
+                    "total_reports": 0,
+                    "country": None,
+                    "isp": None,
+                    "domain": None,
+                    "usage_type": None,
+                    "last_reported": None,
+                    "status": "failed",
+                    "error": str(e),
+                    "source": ips.get(ip, f"resolved from {resolved.get(ip)}"),
+                })
+                break
+            except Exception as e:
+                # Non-fatal error for specific IP
+                lookups.append({
+                    "ip": ip,
+                    "abuse_score": None,
+                    "total_reports": 0,
+                    "country": None,
+                    "isp": None,
+                    "domain": None,
+                    "usage_type": None,
+                    "last_reported": None,
+                    "status": "failed",
+                    "error": str(e),
+                    "source": ips.get(ip, f"resolved from {resolved.get(ip)}"),
+                })
+
     ti = threat_intel_features(lookups) if abuse_key and not lookup_error else None
 
-    result = {"info": info, "features": row, "static": static, "ips": ips, "domains": domains,
-              "resolved": resolved, "lookups": lookups, "threat_features": ti, "lookup_error": lookup_error}
+    # Feature 2: Registrable domain label Shannon entropy (offline tldextract)
+    domain_entropy = [calculate_domain_entropy(d) for d in sorted(domains.keys())]
+
+    # Feature 3: MITRE ATT&CK candidates (rule-based, always labelled candidate)
+    attack_candidates = extract_attack_candidates(info, row=row, domain_entropy=domain_entropy)
+
+    # Feature 1: URLhaus lookups (POST https://urlhaus-api.abuse.ch/v1/host/)
+    urlhaus_results = []
+    effective_urlhaus_key = urlhaus_key or os.environ.get("ABUSECH_AUTH_KEY")
+    all_hosts = []
+    seen_hosts = set()
+    for host in list(ips.keys()) + list(domains.keys()):
+        if host not in seen_hosts:
+            seen_hosts.add(host)
+            all_hosts.append(host)
+
+    for host in all_hosts:
+        if effective_urlhaus_key:
+            try:
+                res = check_urlhaus_host(host, auth_key=effective_urlhaus_key, timeout=10, http_post=http_post)
+            except Exception as e:
+                res = {
+                    "status": "UNAVAILABLE",
+                    "host": host,
+                    "url_count": 0,
+                    "error": f"URLhaus query error: {e}",
+                }
+        else:
+            res = {
+                "status": "UNAVAILABLE",
+                "host": host,
+                "url_count": 0,
+                "error": "URLhaus lookup not queried: No Auth-Key provided or configured in ABUSECH_AUTH_KEY environment variable",
+            }
+        urlhaus_results.append(res)
+
+    if not urlhaus_results:
+        urlhaus_results.append({
+            "status": "UNAVAILABLE",
+            "host": "none",
+            "url_count": 0,
+            "error": "No embedded IP or domain hosts found in APK to query",
+        })
+
+    n_dex = int(info.get("n_dex", 0))
+    n_active_features = int(row.sum(axis=1).iloc[0])
+
+    result = {
+        "info": info,
+        "features": row,
+        "static": static,
+        "n_dex": n_dex,
+        "n_active_features": n_active_features,
+        "ips": ips,
+        "domains": domains,
+        "resolved": resolved,
+        "lookups": lookups,
+        "threat_features": ti,
+        "lookup_error": lookup_error,
+        "urlhaus": urlhaus_results,
+        "domain_entropy": domain_entropy,
+        "attack_candidates": attack_candidates,
+    }
     if verbose:
         print_report(result, n_ignored, bool(abuse_key), resolve_domains)
     return result
@@ -391,6 +814,23 @@ def print_report(r, n_ignored, used_key, resolved_domains):
         t = r["threat_features"]
         print(f"    Max abuse score {t['max_abuse_score']}  |  malicious IPs {t['malicious_ip_count']}  "
               f"|  network risk {t['network_risk']}")
+
+    if r.get("domain_entropy"):
+        print("\n[3] DOMAIN SHANNON ENTROPY (heuristic / candidate, threshold > 3.4)")
+        for item in r["domain_entropy"][:10]:
+            flag_str = "[FLAGGED DGA CANDIDATE]" if item.get("flag") else "normal"
+            print(f"      domain: {item.get('domain'):30s} label: {item.get('label'):16s} entropy: {item.get('entropy'):.3f} ({flag_str})")
+
+    if r.get("attack_candidates"):
+        print("\n[4] MITRE ATT&CK CANDIDATES (heuristic / candidate)")
+        for ac in r["attack_candidates"]:
+            print(f"      [{ac['technique_id']}] {ac['technique_name']} (candidate) - {ac['evidence']}")
+
+    if r.get("urlhaus"):
+        print("\n[5] URLHAUS THREAT INTELLIGENCE (abuse.ch, heuristic / candidate)")
+        for uh in r["urlhaus"]:
+            print(f"      host: {uh.get('host'):25s} status: {uh.get('status')} (urls: {uh.get('url_count', 0)})")
+
     print("\nNOTE: embedded indicators are read from the app's code, not captured from live traffic.")
     print("      Some API/command features are matched by code search, so results approximate the benchmark.")
     print(line)
@@ -421,4 +861,8 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("usage: python phase3_live_demo.py path/to/app.apk")
         sys.exit(1)
-    analyze_apk(sys.argv[1], abuse_key=os.environ.get("ABUSEIPDB_KEY"))
+    analyze_apk(
+        sys.argv[1],
+        abuse_key=os.environ.get("ABUSEIPDB_API_KEY") or os.environ.get("ABUSEIPDB_KEY"),
+        urlhaus_key=os.environ.get("ABUSECH_AUTH_KEY"),
+    )
