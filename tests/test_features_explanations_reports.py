@@ -131,6 +131,10 @@ class TestExtractIndicators(unittest.TestCase):
 class TestCheckIpMocking(unittest.TestCase):
     """check_ip must correctly handle various AbuseIPDB response codes."""
 
+    def setUp(self):
+        from phase3_live_demo import _ti_cache_clear
+        _ti_cache_clear()
+
     def test_success_returns_abuse_data(self):
         result = check_ip("8.8.8.8", api_key="test-key", http_get=_make_http_get(200, ABUSEIPDB_SUCCESS_BODY))
         self.assertEqual(result["ip"], "8.8.8.8")
@@ -186,6 +190,10 @@ class TestCheckIpMocking(unittest.TestCase):
 
 
 class TestThreatIntelEndpoints(unittest.TestCase):
+
+    def setUp(self):
+        from phase3_live_demo import _ti_cache_clear
+        _ti_cache_clear()
     def test_status_missing_key(self):
         with patch("backend.main.get_configured_abuseipdb_key", return_value=None):
             status = threat_intel_status_endpoint()
@@ -518,8 +526,15 @@ class TestDownloadDynamicReport(unittest.TestCase):
         jid = "test-dyn-dl-3"
         self._register_job(jid)
         with self.assertRaises(HTTPException) as ctx:
-            download_dynamic_report(jid, "pdf")
+            download_dynamic_report(jid, "xml")
         self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_pdf_format_returns_pdf_response(self):
+        jid = "test-dyn-dl-4"
+        self._register_job(jid)
+        resp = download_dynamic_report(jid, "pdf")
+        self.assertEqual(resp.media_type, "application/pdf")
+        self.assertTrue(resp.body.startswith(b"%PDF"))
 
 
 # ── Feature explanations ──────────────────────────────────────────────────────

@@ -21,6 +21,38 @@ import joblib
 import tldextract
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# In-memory thread-safe TTL cache for threat-intelligence lookups (AbuseIPDB & URLhaus)
+# ---------------------------------------------------------------------------
+import threading as _threading
+import time as _time
+
+_TI_CACHE = {}
+_TI_CACHE_LOCK = _threading.Lock()
+_TI_CACHE_TTL = 86400.0  # 24 hours
+
+
+def _ti_cache_get(key: str):
+    with _TI_CACHE_LOCK:
+        entry = _TI_CACHE.get(key)
+        if entry is None:
+            return None
+        val, ts = entry
+        if _time.monotonic() - ts > _TI_CACHE_TTL:
+            _TI_CACHE.pop(key, None)
+            return None
+        return dict(val) if isinstance(val, dict) else val
+
+
+def _ti_cache_set(key: str, val) -> None:
+    with _TI_CACHE_LOCK:
+        _TI_CACHE[key] = (dict(val) if isinstance(val, dict) else val, _time.monotonic())
+
+
+def _ti_cache_clear() -> None:
+    with _TI_CACHE_LOCK:
+        _TI_CACHE.clear()
+
 warnings.filterwarnings("ignore")
 logging.disable(logging.CRITICAL)
 try:                                   # androguard logs a lot through loguru
@@ -236,6 +268,8 @@ def predict_static(row, bundle, top_n=8, n_dex=None):
         "reason": verdict_reason,
         "evidence": evidence,
         "shap_map": shap_map,
+        "shap_source": "XGBoost component of ensemble",
+        "shap_note": "SHAP values represent local feature attributions for the XGBoost component. The ensemble prediction averages Random Forest and XGBoost outputs.",
         "n_dex": n_dex,
         "n_active_features": n_active,
     }
@@ -333,6 +367,10 @@ def check_ip(ip, api_key, max_age_days=90, timeout=15, http_get=None):
             "error": "IP is in a private, loopback, or reserved range.",
         }
 
+    cached = _ti_cache_get(f"abuseipdb:{ip}")
+    if cached is not None:
+        return dict(cached)
+
     if http_get is None:
         import requests
         http_get = requests.get
@@ -347,7 +385,7 @@ def check_ip(ip, api_key, max_age_days=90, timeout=15, http_get=None):
         raise ValueError(f"AbuseIPDB could not accept '{ip}' as an IP address.")
     r.raise_for_status()
     d = r.json()["data"]
-    return {
+    res = {
         "ip": ip,
         "abuse_score": int(d.get("abuseConfidenceScore", 0)),
         "total_reports": int(d.get("totalReports", 0)),
@@ -359,6 +397,8 @@ def check_ip(ip, api_key, max_age_days=90, timeout=15, http_get=None):
         "status": "checked",
         "error": None,
     }
+    _ti_cache_set(f"abuseipdb:{ip}", res)
+    return res
 
 
 def get_known_bad_ips(api_key, n=3, http_get=None):
@@ -410,6 +450,9 @@ def validate_lookup(api_key, extra_ips=(), http_get=None):
 # 5b. URLHAUS THREAT INTELLIGENCE (abuse.ch)
 # =============================================================================
 def check_urlhaus_host(host, auth_key=None, timeout=10, http_post=None):
+    cached = _ti_cache_get(f"urlhaus:{host}")
+    if cached is not None:
+        return cached
     """Query URLhaus API for a host (domain or IP).
 
     POST https://urlhaus-api.abuse.ch/v1/host/ with form field host=<domain or IP>
@@ -469,18 +512,22 @@ def check_urlhaus_host(host, auth_key=None, timeout=10, http_post=None):
     if query_status == "ok":
         raw_count = body.get("url_count")
         url_count = int(raw_count if raw_count is not None else len(body.get("urls") or []))
-        return {
+        res = {
             "status": "LISTED",
             "host": host,
             "url_count": url_count,
             "urlhaus_reference": body.get("urlhaus_reference"),
         }
+        _ti_cache_set(f"urlhaus:{host}", res)
+        return res
     elif query_status == "no_results":
-        return {
+        res = {
             "status": "NOT_LISTED",
             "host": host,
             "url_count": 0,
         }
+        _ti_cache_set(f"urlhaus:{host}", res)
+        return res
     else:
         # Any other query_status (e.g. no_auth, invalid_host, error) MUST be reported as UNAVAILABLE
         return {

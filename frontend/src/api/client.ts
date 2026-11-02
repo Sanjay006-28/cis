@@ -115,7 +115,7 @@ export function reportUrl(analysisId: string, format: "json" | "pdf" | "csv") {
   return `${API_BASE}/api/analysis/${encodeURIComponent(analysisId)}/reports/${format}`;
 }
 
-export function dynamicReportUrl(jobId: string, format: "json" = "json") {
+export function dynamicReportUrl(jobId: string, format: "json" | "pdf" = "json") {
   return `${API_BASE}/api/analyze/dynamic/${encodeURIComponent(jobId)}/reports/${format}`;
 }
 

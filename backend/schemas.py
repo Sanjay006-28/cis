@@ -130,7 +130,7 @@ class DynamicAnalysisAccepted(BaseModel):
 
 class DynamicJobStatus(BaseModel):
     job_id: str
-    status: Literal["queued", "running", "completed", "failed"]
+    status: Literal["queued", "running", "completed", "failed", "interrupted"]
     filename: str
     requested_seconds: int
     created_at: str
@@ -148,6 +148,11 @@ class DynamicAnalysisResult(BaseModel):
     actual_seconds: float
     decision_threshold: float = 0.50
     classifier_info: str = "Dynamic XGBoost (Normalized Syscall Shares on CICMalDroid2020)"
+    # Verdict fields - malware_probability mirrors probability_normalized_shares (xgb_share model).
+    # The verdict is driven exclusively by the normalized-shares model (active_model = "xgb_share").
+    malware_probability: float = Field(ge=0, le=1, default=0.0)
+    active_model: str = "xgb_share"
+    verdict: str = "UNKNOWN"
     counts: dict[str, int]
     mapped_counts: dict[str, int]
     unmapped_counts: dict[str, int]
@@ -158,6 +163,7 @@ class DynamicAnalysisResult(BaseModel):
     probability_raw_counts: float = Field(ge=0, le=1)
     shap_evidence: list[dict[str, Any]]
     behavioral_anomalies: list[DynamicAnomalyExplanation] = Field(default_factory=list)
+    runtime_threat_intelligence: list[dict[str, Any]] = Field(default_factory=list)
     raw_report: str
     notice: str
 

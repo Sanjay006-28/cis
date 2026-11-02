@@ -38,15 +38,65 @@ REMOTE_OUT = "/data/local/tmp/strace_out.txt"
 REMOTE_STRACE = "/data/local/tmp/strace"                    # where you push strace if the image has none
 
 # strace reports names of the CPU it runs on; the training data used 32-bit ARM names.
-# This maps the common differences. Anything not listed is matched by identical name only.
+# This maps the common differences to the CICMalDroid2020 139-feature vocabulary.
+# Anything not listed or with no in-vocabulary target remains unmapped.
+#
+# Semantic Classification:
+# 1. Exact Architecture / ABI Adaptations (identical userland operation, adjusting for 32/64-bit width, LFS offsets, or ARM calling convention):
+#    - fstatfs -> fstatfs64, statfs -> statfs64 (64-bit filesystem statistics struct adaptation)
+#    - fstat -> fstat64, stat -> stat64, lstat -> lstat64 (64-bit file status struct adaptation)
+#    - mmap -> mmap2, lseek -> _llseek, select -> _newselect, fcntl -> fcntl64, ftruncate -> ftruncate64 (64-bit offset & ABI adaptations)
+#    - getuid/geteuid/getgid/getegid/setuid/setgid -> *32 (32-bit UID/GID credential adaptations)
+#    - cacheflush -> __arm_nr_cacheflush, set_tls -> __arm_nr_set_tls (ARM-specific architecture syscall numbers)
+# 2. Approximate Behavioral Groupings (differing signatures, signal masks, or directory-relative *at scopes grouped to closest training counterpart):
+#    - ppoll -> poll (adds nanosecond precision and atomic sigmask; grouped by shared I/O event polling function)
+#    - epoll_pwait -> epoll_wait (adds sigmask parameter for atomic unmasking; grouped by epoll wait function)
+#    - newfstatat / fstatat64 -> fstat64 (directory-relative stat taking dirfd and AT_SYMLINK_NOFOLLOW; grouped to stat family)
+#    - openat -> open (POSIX *at directory-relative file open with flags relative to dirfd)
+#    - readlinkat -> readlink (POSIX *at symbolic link target inspection relative to dirfd)
+#    - fchmodat -> chmod (POSIX *at file mode change by pathname relative to dirfd)
+#    - mkdirat -> mkdir (POSIX *at directory creation relative to dirfd)
+#    - unlinkat -> unlink (POSIX *at file removal; in modern kernels also handles rmdir when AT_REMOVEDIR flag is passed)
+#    - renameat / renameat2 -> rename (POSIX *at file move/rename; renameat2 adds exchange/noreplace flags)
+# Note: 'sendfile' and 'truncate64' are not in the 139-feature training vocabulary;
+# unmapped calls remain in unmapped_counts without silent feature meaning changes.
 ALIASES = {
     "mmap": "mmap2", "lseek": "_llseek", "fstat": "fstat64", "stat": "stat64", "lstat": "lstat64",
     "select": "_newselect", "fcntl": "fcntl64", "getuid": "getuid32", "geteuid": "geteuid32",
     "getgid": "getgid32", "getegid": "getegid32", "setuid": "setuid32", "setgid": "setgid32",
     "openat": "open", "cacheflush": "__arm_nr_cacheflush", "set_tls": "__arm_nr_set_tls",
-    "ftruncate": "ftruncate64", "truncate": "truncate64", "sendfile": "sendfile64",
+    "ftruncate": "ftruncate64",
     "newfstatat": "fstat64", "fstatat64": "fstat64", "epoll_pwait": "epoll_wait",
+    # Modern Android 14 / x86_64 system call compatibility mappings
+    "ppoll": "poll",
+    "fstatfs": "fstatfs64",
+    "statfs": "statfs64",
+    "readlinkat": "readlink",
+    "fchmodat": "chmod",
+    "mkdirat": "mkdir",
+    "unlinkat": "unlink",
+    "renameat": "rename",
+    "renameat2": "rename",
 }
+
+_DYNAMIC_BUNDLE_CACHE = {}
+_DYNAMIC_SHAP_CACHE = {}
+
+
+def get_dynamic_bundle(bundle_path=BUNDLE_PATH):
+    """Load and cache the dynamic model bundle in memory."""
+    if bundle_path not in _DYNAMIC_BUNDLE_CACHE:
+        _DYNAMIC_BUNDLE_CACHE[bundle_path] = joblib.load(bundle_path)
+    return _DYNAMIC_BUNDLE_CACHE[bundle_path]
+
+
+def get_dynamic_explainer(bundle_path=BUNDLE_PATH):
+    """Reuse initialized SHAP TreeExplainer for the shares model."""
+    if bundle_path not in _DYNAMIC_SHAP_CACHE:
+        import shap
+        b = get_dynamic_bundle(bundle_path)
+        _DYNAMIC_SHAP_CACHE[bundle_path] = shap.TreeExplainer(b["xgb_share"])
+    return _DYNAMIC_SHAP_CACHE[bundle_path]
 
 
 # =============================================================================
@@ -158,6 +208,30 @@ def check_setup(device=None):
 _ROW = re.compile(r"^\s*\d+(?:\.\d+)?\s+\d+\.\d+\s+\d+\s+(\d+)(?:\s+\d+)?\s+([A-Za-z_][A-Za-z0-9_]*)\s*$")
 
 
+def parse_proc_net_connections(proc_net_text):
+    """Extract remote public IPv4 destinations from emulator /proc/net/tcp output."""
+    import ipaddress
+    found_ips = set()
+    for line in proc_net_text.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 4 or ":" not in parts[2]:
+            continue
+        rem_hex = parts[2]
+        try:
+            ip_hex, port_hex = rem_hex.split(":")
+            ip_int = int.from_bytes(bytes.fromhex(ip_hex), byteorder="little")
+            port = int(port_hex, 16)
+            ip_obj = ipaddress.IPv4Address(ip_int)
+            s_ip = str(ip_obj)
+            # Filter out private, loopback, multicast, and emulator gateway (10.0.2.x)
+            if not (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_multicast or ip_obj.is_reserved or not ip_obj.is_global):
+                if not s_ip.startswith("10.0.2."):
+                    found_ips.add((s_ip, port))
+        except Exception:
+            pass
+    return sorted(found_ips)
+
+
 def parse_strace_summary(text):
     """Parse the table printed by `strace -c` into {syscall_name: number_of_calls}."""
     counts = {}
@@ -171,6 +245,22 @@ def parse_strace_summary(text):
 def package_name(apk_path):
     from androguard.core.apk import APK
     return APK(apk_path).get_package()
+
+
+def has_launcher_activity(apk_path):
+    """Check whether the APK declares an Activity with LAUNCHER intent filter category."""
+    try:
+        from androguard.core.apk import APK
+        apk = APK(apk_path)
+        for act in apk.get_activities():
+            filters = apk.get_intent_filters("activity", act)
+            actions = filters.get("action", [])
+            categories = filters.get("category", [])
+            if any("MAIN" in str(a) for a in actions) and any("LAUNCHER" in str(c) for c in categories):
+                return True
+        return False
+    except Exception:
+        return True
 
 
 def capture_syscalls(apk_path, seconds=60, uninstall=True, device=None, throttle_ms=300, verbose=True):
@@ -202,6 +292,11 @@ def capture_syscalls(apk_path, seconds=60, uninstall=True, device=None, throttle
         pass
 
     say(f"[1/5] installing {pkg} ...")
+    if not has_launcher_activity(apk_path):
+        raise RuntimeError(
+            f"APK '{os.path.basename(apk_path)}' declares no launcher activity (no android.intent.category.LAUNCHER). "
+            "Monkey requires a launchable component to execute the app. Service-only or background components cannot be traced via UI fuzzing."
+        )
     code, out, err = adb("install", "-r", "-g", install_path, timeout=180, device=device)
     if "Success" not in out:
         raise RuntimeError(f"Install failed: {(out + ' ' + err)[:300]}")
@@ -234,8 +329,17 @@ def capture_syscalls(apk_path, seconds=60, uninstall=True, device=None, throttle
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
         procs.append(p_monkey)
         t0 = time.time()
+        runtime_connections = set()
         while time.time() - t0 < seconds:
             time.sleep(1)
+            # Sample live TCP sockets established by the running processes
+            try:
+                code, net_out, _ = sh("cat /proc/net/tcp /proc/net/tcp6 2>/dev/null", device=device)
+                if code == 0 and net_out:
+                    for ip_port in parse_proc_net_connections(net_out):
+                        runtime_connections.add(ip_port)
+            except Exception:
+                pass
             if p_strace.poll() is not None:
                 break                                        # strace ended early (the app probably exited)
 
@@ -254,14 +358,30 @@ def capture_syscalls(apk_path, seconds=60, uninstall=True, device=None, throttle
         if not counts:
             raise RuntimeError("No system-call counts were captured (the output file was empty). "
                                "The app may have exited right away, or strace could not attach.")
-        return {"package": pkg, "pid": pid, "seconds": seconds, "counts": counts, "raw_text": text}
+        trace_meta = {
+            "trace_start_method": "post_launch",
+            "trace_boundary": "Capture started after application launch via strace attach; process initialization and native library load calls prior to attach may be absent from this trace.",
+            "pid": pid,
+            "runtime_connections": [{"ip": ip, "port": port} for ip, port in sorted(runtime_connections)],
+        }
+        return {"package": pkg, "pid": pid, "seconds": seconds, "counts": counts, "raw_text": text, "trace_metadata": trace_meta, "runtime_connections": [{"ip": ip, "port": port} for ip, port in sorted(runtime_connections)]}
     finally:
         for p in procs:
-            if p.poll() is None:
-                p.terminate()
+            try:
+                if p.poll() is None:
+                    p.terminate()
+            except Exception:
+                pass
+        try:
+            sh("pkill -2 strace 2>/dev/null || pkill -9 strace 2>/dev/null; pkill -9 monkey 2>/dev/null", device=device)
+        except Exception:
+            pass
         if uninstall:
             say("[5/5] uninstalling the app ...")
-            adb("uninstall", pkg, timeout=60, device=device)
+            try:
+                adb("uninstall", pkg, timeout=60, device=device)
+            except Exception:
+                pass
 
 
 # =============================================================================
@@ -282,14 +402,14 @@ def map_to_model(counts, vocabulary):
 
 
 def predict_from_counts(mapped, bundle_path=BUNDLE_PATH):
-    b = joblib.load(bundle_path)
+    b = get_dynamic_bundle(bundle_path)
     row = pd.DataFrame([[mapped.get(s, 0) for s in b["all_syscalls"]]], columns=b["all_syscalls"])
     shares = row.div(row.sum(axis=1).replace(0, 1), axis=0)
     out = {"counts": float(b["xgb"].predict_proba(row[b["top_features"]])[:, 1][0]),
            "shares": float(b["xgb_share"].predict_proba(shares[b["top_features"]])[:, 1][0])}
     try:                                                      # which syscalls drove the (shares) decision
-        import shap
-        sv = np.asarray(shap.TreeExplainer(b["xgb_share"]).shap_values(shares[b["top_features"]]))[0]
+        explainer = get_dynamic_explainer(bundle_path)
+        sv = np.asarray(explainer.shap_values(shares[b["top_features"]]))[0]
         order = np.argsort(-np.abs(sv))[:6]
         out["evidence"] = [(b["top_features"][i], float(row[b["top_features"][i]].iloc[0]), float(sv[i])) for i in order]
     except Exception:
@@ -327,7 +447,7 @@ def analyze_dynamic(apk_path, seconds=60, bundle_path=BUNDLE_PATH, uninstall=Tru
 
 def analyze_counts(result, bundle_path=BUNDLE_PATH, verbose=True):
     """Turn captured counts into a prediction (also usable on a saved `strace -c` text file, see below)."""
-    vocab = joblib.load(bundle_path)["all_syscalls"]
+    vocab = get_dynamic_bundle(bundle_path)["all_syscalls"]
     mapped, coverage, unmapped = map_to_model(result["counts"], vocab)
     pred = predict_from_counts(mapped, bundle_path)
     if verbose:

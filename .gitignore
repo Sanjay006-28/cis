@@ -35,3 +35,6 @@ node_modules/
 frontend/.env.local
 *.tsbuildinfo
 
+
+.job_store.db
+*.db

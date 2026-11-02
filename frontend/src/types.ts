@@ -146,7 +146,7 @@ export interface DynamicAccepted {
 
 export interface DynamicJob {
   job_id: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "interrupted";
   filename: string;
   requested_seconds: number;
   created_at: string;
@@ -164,6 +164,9 @@ export interface DynamicResult {
   actual_seconds: number;
   decision_threshold: number;
   classifier_info: string;
+  malware_probability?: number;
+  active_model?: string;
+  verdict?: string;
   counts: Record<string, number>;
   mapped_counts: Record<string, number>;
   unmapped_counts: Record<string, number>;
@@ -174,6 +177,15 @@ export interface DynamicResult {
   probability_raw_counts: number;
   shap_evidence: Array<{ syscall: string; count: number; shap: number }>;
   behavioral_anomalies: DynamicAnomalyExplanation[];
+  runtime_threat_intelligence?: Array<{
+    ip: string;
+    port: number;
+    status: string;
+    abuse_score: number;
+    total_reports: number;
+    isp: string | null;
+    country: string | null;
+  }>;
   raw_report: string;
   notice: string;
 }

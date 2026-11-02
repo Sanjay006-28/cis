@@ -78,8 +78,8 @@ function BehavioralAnomaliesPanel({ result }: { result: DynamicResult }) {
   }
   const cats = Object.keys(byCategory).sort();
 
-  const isMalware = result.probability_normalized_shares >= result.decision_threshold;
-  const pct = (result.probability_normalized_shares * 100).toFixed(1);
+  const isMalware = result.verdict === "MALWARE" || (!result.verdict && result.probability_normalized_shares >= result.decision_threshold);
+  const pct = ((result.malware_probability ?? result.probability_normalized_shares) * 100).toFixed(1);
 
   return (
     <section className="panel">
@@ -100,7 +100,7 @@ function BehavioralAnomaliesPanel({ result }: { result: DynamicResult }) {
           <div>
             <div style={{ fontSize: "11px", color: "#7f95ac", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "4px" }}>Dynamic Verdict</div>
             <div style={{ fontSize: "24px", fontWeight: 700, color: isMalware ? "#f19890" : "#72c4a4" }}>
-              {isMalware ? "MALWARE" : "BENIGN"}
+              {result.verdict ?? (isMalware ? "MALWARE" : "BENIGN")}
             </div>
           </div>
           <div>
@@ -191,7 +191,16 @@ export function DynamicPage() {
         if (next.status === "failed") return;
         timer = setTimeout(poll, 2000);
       } catch (reason) {
-        if (active) setError(reason instanceof Error ? reason.message : "Could not retrieve job status.");
+        if (!active) return;
+        const msg = reason instanceof Error ? reason.message : String(reason);
+        if (msg.includes("404") || msg.toLowerCase().includes("not found")) {
+          sessionStorage.removeItem(SAVED_JOB_KEY);
+          setJobId(null);
+          setJob(null);
+          setError("The previous dynamic analysis job is no longer available (the backend may have restarted). The job state has been cleared so you can start a new analysis.");
+        } else {
+          setError(msg);
+        }
       }
     };
     void poll();
@@ -366,8 +375,9 @@ export function DynamicPage() {
           {job.status === "queued" && <StateMessage kind="info">Job accepted and waiting for the analysis worker.</StateMessage>}
           {job.status === "running" && <StateMessage kind="loading">The backend is capturing syscalls in the emulator. Progress percentages are not available from the capture engine.</StateMessage>}
           {job.status === "failed" && <StateMessage kind="error">{job.error ?? "Dynamic analysis failed."}</StateMessage>}
+          {job.status === "interrupted" && <StateMessage kind="error">{job.error ?? "Dynamic analysis was interrupted (e.g. backend restarted). Please start a new run."}</StateMessage>}
           {job.status === "completed" && <StateMessage kind="success">Analysis complete. Results are shown below.</StateMessage>}
-          {(job.status === "completed" || job.status === "failed") && (
+          {(job.status === "completed" || job.status === "failed" || job.status === "interrupted") && (
             <button className="button button-secondary" style={{ marginTop: "8px" }} onClick={clearJob}>
               Clear job
             </button>
@@ -375,103 +385,264 @@ export function DynamicPage() {
         </section>
       )}
 
-      {result && (
-        <div className="results-stack">
-          <div className="notice notice-info"><Activity size={17} /><p>{result.notice}</p></div>
+      {result && (() => {
+        const isMalware = result.verdict === "MALWARE" || result.verdict === "Malicious" || (result.probability_normalized_shares >= result.decision_threshold);
+        const probDisplay = (result.probability_normalized_shares * 100).toFixed(1);
 
-          <div className="metric-grid">
-            <ResultMetric label="Package" value={result.package} />
-            <ResultMetric label="System calls counted" value={result.system_call_count.toLocaleString()} />
-            <ResultMetric label="Vocabulary coverage" value={`${(result.vocabulary_coverage * 100).toFixed(1)}%`} />
-            <ResultMetric label="Model features seen" value={String(result.features_seen)} />
-          </div>
-          <div className="metric-grid">
-            <ResultMetric label="Probability · normalized shares" value={`${(result.probability_normalized_shares * 100).toFixed(1)}%`} />
-            <ResultMetric label="Probability · raw counts" value={`${(result.probability_raw_counts * 100).toFixed(1)}%`} />
-            <ResultMetric label="Trace duration" value={`${result.actual_seconds}s`} />
-            <ResultMetric label="Unmapped syscall types" value={String(Object.keys(result.unmapped_counts).length)} />
-          </div>
-
-          {/* Behavioral anomalies with SHAP explanations */}
-          <BehavioralAnomaliesPanel result={result} />
-
-          {/* SHAP evidence table */}
-          <section className="panel">
-            <h2>SHAP evidence · normalized-share model</h2>
-            <p>Positive values push the model toward malware; negative values push toward benign. These are local values for this run only.</p>
-            {result.shap_evidence.length ? (
-              <div className="table-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>System call</th>
-                      <th>Observed count</th>
-                      <th>SHAP contribution</th>
-                      <th>Direction</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.shap_evidence.map((row) => (
-                      <tr key={row.syscall}>
-                        <td style={{ fontFamily: "monospace" }}>{row.syscall}</td>
-                        <td>{row.count.toLocaleString()}</td>
-                        <td style={{ fontFamily: "monospace" }}>
-                          <span className={`badge ${row.shap > 0 ? "badge-dir-malware" : "badge-dir-benign"}`}>
-                            {row.shap > 0 ? "+" : ""}{row.shap.toFixed(4)}
-                          </span>
-                        </td>
-                        <td>{row.shap > 0 ? "Toward malware" : "Toward benign"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+        return (
+          <div className="results-stack">
+            {/* Dynamic Verdict Hero Banner */}
+            <section className={`result-banner ${isMalware ? "result-banner-malware" : "result-banner-benign"}`}>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
+                  <span className={`badge ${isMalware ? "badge-danger" : "badge-success"}`}>
+                    {isMalware ? "CRITICAL RUNTIME THREAT" : "VERIFIED BENIGN BEHAVIOR"}
+                  </span>
+                  <span className="topbar-env-pill">CICMalDroid2020 · Dynamic XGBoost (xgb_share)</span>
+                </div>
+                <h2 className={isMalware ? "verdict-malware" : "verdict-benign"}>
+                  {result.verdict ?? (isMalware ? "Malicious" : "Benign")}
+                </h2>
+                <p style={{ maxWidth: "700px" }}>{result.notice}</p>
               </div>
-            ) : <p className="empty-state">The model did not return SHAP evidence for this run.</p>}
-          </section>
 
-          {/* Raw report + syscall counts */}
-          <section className="panel">
-            <details className="details-list" open>
-              <summary>Raw strace report</summary>
-              <pre className="raw-report">{result.raw_report || "The capture engine returned no raw report text."}</pre>
-            </details>
-            <details className="details-list">
-              <summary>System-call counts ({Object.keys(result.counts).length})</summary>
-              <div className="table-scroll">
-                <table>
-                  <thead><tr><th>System call</th><th>Count</th></tr></thead>
-                  <tbody>
-                    {Object.entries(result.counts)
-                      .sort(([, a], [, b]) => b - a)
-                      .map(([name, count]) => (
-                        <tr key={name}><td style={{ fontFamily: "monospace" }}>{name}</td><td>{count.toLocaleString()}</td></tr>
-                      ))}
-                  </tbody>
-                </table>
+              <div className="risk-gauge-wrap">
+                <div className={`risk-gauge-circle ${isMalware ? "risk-gauge-malware" : "risk-gauge-benign"}`}>
+                  <span className="risk-gauge-score" style={{ color: isMalware ? "#f87171" : "#34d399" }}>
+                    {(result.probability_normalized_shares * 100).toFixed(0)}%
+                  </span>
+                  <span className="risk-gauge-label">Runtime Risk</span>
+                </div>
+                <div className="probability">
+                  <span>Threshold: ≥ {(result.decision_threshold * 100).toFixed(0)}%</span>
+                  <strong style={{ fontSize: "20px" }}>{probDisplay}%</strong>
+                </div>
               </div>
-            </details>
-          </section>
+            </section>
 
-          {/* Download */}
-          <section className="panel export-panel">
-            <div>
-              <h2>Export dynamic report</h2>
-              <p>Downloads the dynamic analysis result as a structured JSON file. No API keys or credentials are included.</p>
+            {/* Dual-Column Dynamic Workspace */}
+            <div className="analysis-layout">
+              {/* Primary Column (Left) */}
+              <div style={{ display: "grid", gap: "16px" }}>
+                {/* Metric Summary Grids */}
+                <div className="metric-grid" style={{ margin: "0" }}>
+                  <ResultMetric label="Target Package" value={result.package} />
+                  <ResultMetric label="System Calls Intercepted" value={result.system_call_count.toLocaleString()} />
+                  <ResultMetric label="Vocabulary Coverage" value={`${(result.vocabulary_coverage * 100).toFixed(1)}%`} />
+                  <ResultMetric label="Model Features Active" value={String(result.features_seen)} />
+                </div>
+
+                <div className="metric-grid" style={{ margin: "0" }}>
+                  <ResultMetric label="Probability (Normalized Shares)" value={`${probDisplay}%`} />
+                  <ResultMetric label="Probability (Raw Counts)" value={`${(result.probability_raw_counts * 100).toFixed(1)}%`} />
+                  <ResultMetric label="Execution Trace Window" value={`${result.actual_seconds}s`} />
+                  <ResultMetric label="Unmapped Syscall Types" value={String(Object.keys(result.unmapped_counts).length)} />
+                </div>
+
+                {/* Behavioral Anomalies */}
+                <BehavioralAnomaliesPanel result={result} />
+
+                {/* Runtime Threat Intelligence Panel */}
+                {result.runtime_threat_intelligence && result.runtime_threat_intelligence.length > 0 && (
+                  <section className="panel">
+                    <div className="panel-heading">
+                      <div>
+                        <h2>Runtime Network Threat Intelligence</h2>
+                        <p>Remote public IP destinations observed on active sockets (/proc/net/tcp) during emulator execution, cross-referenced with live threat intelligence feeds.</p>
+                      </div>
+                      <span className="badge badge-danger">
+                        {result.runtime_threat_intelligence.length} Active Public Sockets
+                      </span>
+                    </div>
+                    <div className="table-scroll">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Observed Destination</th>
+                            <th>Port</th>
+                            <th>Country</th>
+                            <th>ISP / Organization</th>
+                            <th>Abuse Confidence</th>
+                            <th>Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {result.runtime_threat_intelligence.map((conn, idx) => (
+                            <tr key={`${conn.ip}-${idx}`}>
+                              <td className="font-mono">{conn.ip}</td>
+                              <td className="font-mono">{conn.port}</td>
+                              <td>{conn.country || "Unknown"}</td>
+                              <td>{conn.isp || "—"}</td>
+                              <td>
+                                <span className={`badge ${conn.abuse_score >= 50 ? "badge-danger" : conn.abuse_score > 0 ? "badge-warning" : "badge-success"}`}>
+                                  {conn.abuse_score}% ({conn.total_reports} reports)
+                                </span>
+                              </td>
+                              <td><span className="badge">{conn.status}</span></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                )}
+
+                {/* SHAP Evidence Table */}
+                <section className="panel">
+                  <div className="panel-heading">
+                    <div>
+                      <h2>System Call Attribution (SHAP Normalized Shares)</h2>
+                      <p>Positive contributions push toward malware; negative contributions push toward benign.</p>
+                    </div>
+                    <span className="legend">
+                      <i className="legend-positive" /> Toward malware{" "}
+                      <i className="legend-negative" /> Toward benign
+                    </span>
+                  </div>
+                  {result.shap_evidence.length ? (
+                    <div className="table-scroll">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>System Call</th>
+                            <th>Observed Count</th>
+                            <th>SHAP Contribution</th>
+                            <th>Attribution Direction</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {result.shap_evidence.map((row) => (
+                            <tr key={row.syscall}>
+                              <td className="font-mono">{row.syscall}</td>
+                              <td>{row.count.toLocaleString()}</td>
+                              <td className="font-mono">
+                                <span className={`badge ${row.shap > 0 ? "badge-dir-malware" : "badge-dir-benign"}`}>
+                                  {row.shap > 0 ? "+" : ""}{row.shap.toFixed(4)}
+                                </span>
+                              </td>
+                              <td>{row.shap > 0 ? "Toward malware" : "Toward benign"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : <p className="empty-state">The model did not return SHAP evidence for this run.</p>}
+                </section>
+
+                {/* Raw strace report + syscall breakdown */}
+                <section className="panel">
+                  <details className="details-list" open>
+                    <summary>Raw strace capture report</summary>
+                    <pre className="raw-report">{result.raw_report || "The capture engine returned no raw report text."}</pre>
+                  </details>
+                  <details className="details-list" style={{ marginTop: "12px" }}>
+                    <summary>Interpreted System-Call Counts ({Object.keys(result.counts).length})</summary>
+                    <div className="table-scroll">
+                      <table>
+                        <thead><tr><th>System Call</th><th>Observed Count</th></tr></thead>
+                        <tbody>
+                          {Object.entries(result.counts)
+                            .sort(([, a], [, b]) => b - a)
+                            .map(([name, count]) => (
+                              <tr key={name}><td className="font-mono">{name}</td><td>{count.toLocaleString()}</td></tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                </section>
+              </div>
+
+              {/* Inspector Sidebar (Right) */}
+              <aside className="inspector-sticky">
+                {/* Export Dossier */}
+                <div className="meta-drawer">
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "12px" }}>
+                    <Download size={16} style={{ color: "var(--accent)" }} />
+                    <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--text)", letterSpacing: "0.05em" }}>
+                      EXPORT DYNAMIC DOSSIER
+                    </span>
+                  </div>
+                  <div style={{ display: "grid", gap: "8px" }}>
+                    {jobId && (
+                      <a
+                        className="button button-primary"
+                        href={`/api/analyze/dynamic/${jobId}/reports/pdf`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ justifyContent: "center" }}
+                      >
+                        <Download size={15} /> Download Dynamic PDF
+                      </a>
+                    )}
+                    <button
+                      id="btn-download-dynamic-json"
+                      className="button button-secondary"
+                      disabled={downloadBusy || !jobId}
+                      onClick={downloadDynamicJson}
+                      style={{ justifyContent: "center" }}
+                    >
+                      <Download size={15} /> {downloadBusy ? "Downloading…" : "Export JSON (SIEM)"}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Sandbox Telemetry Specs */}
+                <div className="meta-drawer">
+                  <div style={{ fontSize: "11px", fontWeight: 700, color: "var(--accent)", letterSpacing: "0.1em", marginBottom: "12px" }}>
+                    SANDBOX TELEMETRY SPECS
+                  </div>
+                  <div className="meta-row">
+                    <span className="meta-label">Capture Duration</span>
+                    <span className="meta-val font-mono">{result.actual_seconds}s</span>
+                  </div>
+                  <div className="meta-row">
+                    <span className="meta-label">Kernel Interceptor</span>
+                    <span className="meta-val font-mono">strace -c -f -p PID</span>
+                  </div>
+                  <div className="meta-row">
+                    <span className="meta-label">Network Sockets Sampled</span>
+                    <span className="meta-val font-mono">/proc/net/tcp + tcp6</span>
+                  </div>
+                  <div className="meta-row">
+                    <span className="meta-label">Active Outbound Sockets</span>
+                    <span className="meta-val font-mono hash-pill">
+                      {result.runtime_threat_intelligence?.length ?? 0} destinations
+                    </span>
+                  </div>
+                  <div className="meta-row">
+                    <span className="meta-label">Job Reference</span>
+                    <span className="meta-val font-mono hash-pill">{jobId ?? result.job_id}</span>
+                  </div>
+                </div>
+
+                {/* Model Engine Specs */}
+                <div className="meta-drawer">
+                  <div style={{ fontSize: "11px", fontWeight: 700, color: "var(--accent)", letterSpacing: "0.1em", marginBottom: "12px" }}>
+                    DYNAMIC INFERENCE ENGINE
+                  </div>
+                  <div className="meta-row">
+                    <span className="meta-label">Operational Model</span>
+                    <span className="meta-val">XGBoost (xgb_share)</span>
+                  </div>
+                  <div className="meta-row">
+                    <span className="meta-label">Feature Representation</span>
+                    <span className="meta-val">Normalized Syscall Shares</span>
+                  </div>
+                  <div className="meta-row">
+                    <span className="meta-label">Vocabulary Domain</span>
+                    <span className="meta-val">139 CICMalDroid2020 Syscalls</span>
+                  </div>
+                  <div className="meta-row">
+                    <span className="meta-label">Decision Threshold</span>
+                    <span className="meta-val">≥ 50% Probability</span>
+                  </div>
+                </div>
+              </aside>
             </div>
-            <div className="button-row">
-              <button
-                id="btn-download-dynamic-json"
-                className="button button-secondary"
-                disabled={downloadBusy || !jobId}
-                onClick={downloadDynamicJson}
-              >
-                <Download size={16} />
-                {downloadBusy ? "Downloading…" : "Download JSON Report"}
-              </button>
-            </div>
-          </section>
-        </div>
-      )}
+          </div>
+        );
+      })()}
     </>
   );
 }

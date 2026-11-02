@@ -261,6 +261,8 @@ def static_report_payload(
         },
         "model_explanation": {
             "method": "SHAP TreeExplainer (local feature attributions)",
+            "shap_source": "XGBoost component of ensemble",
+            "shap_note": "SHAP values represent local feature attributions for the XGBoost component. The final malware probability is an unweighted average of Random Forest and XGBoost outputs.",
             "evidence": detailed_evidence,
             "interpretation_guide": "Positive SHAP values push verdict toward MALWARE; negative values push toward BENIGN.",
         },
@@ -333,10 +335,16 @@ def build_static_json_report(
 def dynamic_report_payload(
     dynamic_result: dict[str, Any],
 ) -> dict[str, Any]:
-    """Generate a structured, standardized JSON payload for dynamic analysis audit reports."""
+    """Generate a structured, standardized JSON payload for dynamic analysis audit reports.
+
+    The verdict is driven by `probability_normalized_shares` (xgb_share model).
+    `malware_probability` in this payload mirrors `probability_normalized_shares`.
+    """
     prob_shares = round(float(dynamic_result.get("probability_normalized_shares", 0.0)), 4)
     prob_counts = round(float(dynamic_result.get("probability_raw_counts", 0.0)), 4)
-    verdict = "MALWARE" if prob_shares >= 0.50 else "BENIGN"
+    # Read verdict from result if already computed; fall back to deriving from shares probability.
+    verdict = dynamic_result.get("verdict") or ("MALWARE" if prob_shares >= 0.50 else "BENIGN")
+    active_model = dynamic_result.get("active_model", "xgb_share")
 
     evidence = dynamic_result.get("shap_evidence") or []
     anomalies = [
@@ -379,6 +387,7 @@ def dynamic_report_payload(
             ),
         },
         "runtime_anomalies_and_behavioral_evidence": anomalies,
+        "runtime_threat_intelligence": dynamic_result.get("runtime_threat_intelligence", []),
         "system_call_counts": dynamic_result.get("counts", {}),
         "unmapped_system_calls": dynamic_result.get("unmapped_counts", {}),
         "raw_strace_summary": dynamic_result.get("raw_report", ""),
@@ -399,6 +408,11 @@ def build_dynamic_json_report(dynamic_result: dict[str, Any], job_info: dict[str
         payload["job_started_at"] = job_info.get("started_at")
         payload["job_completed_at"] = job_info.get("completed_at")
     return json.dumps(payload, indent=2, default=str).encode("utf-8")
+
+
+def _paginate_lines(lines, lines_per_page=32):
+    for i in range(0, max(1, len(lines)), lines_per_page):
+        yield lines[i:i + lines_per_page]
 
 
 def build_static_pdf_report(
@@ -545,15 +559,156 @@ def build_static_pdf_report(
             for ac in attack_candidates[:8]:
                 lines.append(f"  • [{ac.get('technique_id')}] {ac.get('technique_name')} (candidate) - {ac.get('evidence')[:45]}")
 
-        figure.text(0.08, 0.88, "\n".join(lines), va="top", family="monospace",
-                    fontsize=7.5, linespacing=1.35)
+        # Paginate indicators across multiple pages when list is long
+        pages = list(_paginate_lines(lines, lines_per_page=32))
+        for p_idx, page_lines in enumerate(pages):
+            if p_idx == 0:
+                cur_fig = figure
+            else:
+                cur_fig = plt.figure(figsize=(8.5, 11), dpi=140)
+                cur_fig.text(0.08, 0.94, f"INDICATORS AND THREAT INTELLIGENCE AUDIT (Page {p_idx + 2})",
+                             fontsize=14, fontweight="bold")
+            cur_fig.text(0.08, 0.88, "\n".join(page_lines), va="top", family="monospace",
+                         fontsize=7.5, linespacing=1.35)
+            cur_fig.text(
+                0.08, 0.05,
+                "NOTE: AbuseIPDB reputation data is gathered from external threat intelligence feeds and is never stored permanently. "
+                "All lookup requests are performed securely through the backend proxy.",
+                fontsize=7.5, color="#536273", wrap=True,
+            )
+            pdf.savefig(cur_fig, bbox_inches="tight")
+            plt.close(cur_fig)
+
+    return output.getvalue()
+
+
+def build_dynamic_pdf_report(
+    dynamic_result: dict[str, Any],
+    job_info: dict[str, Any] | None = None,
+    **_kwargs: Any,
+) -> bytes:
+    """Build a publication-quality PDF audit report for dynamic system-call analysis."""
+    output = io.BytesIO()
+    prob_shares = round(float(dynamic_result.get("probability_normalized_shares", 0.0)), 4)
+    prob_counts = round(float(dynamic_result.get("probability_raw_counts", 0.0)), 4)
+    verdict = dynamic_result.get("verdict") or ("MALWARE" if prob_shares >= 0.50 else "BENIGN")
+    filename = dynamic_result.get("filename", "unknown.apk")
+    package = dynamic_result.get("package", "unknown")
+    sha256 = dynamic_result.get("sha256", "unknown")
+    coverage = float(dynamic_result.get("vocabulary_coverage", 0.0))
+    syscall_count = int(dynamic_result.get("system_call_count", 0))
+    actual_seconds = float(dynamic_result.get("actual_seconds", 0.0))
+    evidence = dynamic_result.get("shap_evidence") or []
+    unmapped = dynamic_result.get("unmapped_counts") or {}
+
+    with PdfPages(output) as pdf:
+        # Page 1: Overview and SHAP Evidence
+        figure = plt.figure(figsize=(8.5, 11), dpi=140)
+        figure.text(0.5, 0.96, "DYNAMIC RUNTIME SECURITY REPORT", ha="center",
+                    fontsize=17, fontweight="bold")
+        figure.text(0.5, 0.935, "Live Syscall Emulation ? CICMalDroid2020 XGBoost (Normalized Shares)",
+                    ha="center", fontsize=9.5, color="#536273")
+
+        is_malware = verdict == "MALWARE"
+        box_color = "#fce8e6" if is_malware else "#e6f4ea"
+        text_color = "#c5221f" if is_malware else "#137333"
+
+        ax_banner = figure.add_axes([0.08, 0.83, 0.84, 0.08])
+        ax_banner.set_facecolor(box_color)
+        ax_banner.set_xticks([])
+        ax_banner.set_yticks([])
+        for spine in ax_banner.spines.values():
+            spine.set_color(text_color)
+            spine.set_linewidth(1.5)
+        ax_banner.text(0.5, 0.60, f"VERDICT: {verdict}", fontsize=16, fontweight="bold", color=text_color, ha="center", va="center")
+        ax_banner.text(
+            0.5, 0.22,
+            f"Malware Prob (norm. shares): {prob_shares:.1%}   |   Raw counts prob: {prob_counts:.1%}   |   Threshold: 50.0%",
+            fontsize=9, color=text_color, ha="center", va="center"
+        )
+
+        figure.text(
+            0.08, 0.79,
+            "\n".join((
+                f"Target File:        {filename} (SHA-256: {sha256[:16]}...)",
+                f"Package Name:       {package}",
+                f"Trace Duration:     {actual_seconds}s (requested: {dynamic_result.get('requested_seconds', '?')}s)",
+                f"System Calls:       {syscall_count:,} total counted",
+                f"Vocabulary Coverage:{coverage:.1%} of model vocabulary observed",
+                f"Features Seen:      {dynamic_result.get('features_seen', 0)} of 139 training syscalls",
+                f"Analysis Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+                f"Classifier:         Dynamic XGBoost (Normalized Syscall Shares on CICMalDroid2020)",
+            )),
+            family="monospace", fontsize=8.5, va="top", linespacing=1.6,
+        )
+
+        if evidence:
+            axis = figure.add_axes([0.16, 0.14, 0.76, 0.44])
+            values = [float(row.get("shap", 0)) for row in evidence]
+            labels = [str(row.get("syscall", "?")) for row in evidence]
+            colors = ["#c36b62" if value > 0 else "#277c64" for value in values]
+            positions = np.arange(len(values))
+            axis.barh(positions, values, color=colors, height=0.62)
+            axis.set_yticks(positions, labels, fontsize=8)
+            axis.invert_yaxis()
+            axis.axvline(0, color="#536273", linewidth=0.8)
+            axis.set_xlabel("SHAP Impact (+ pushes toward MALWARE, - pushes toward BENIGN)")
+            axis.set_title("Local Explainable AI Evidence (SHAP on Normalized Shares)")
+            axis.spines[["top", "right"]].set_visible(False)
+        else:
+            figure.text(0.5, 0.4, "No dynamic SHAP evidence was returned for this trace.", ha="center")
+
         figure.text(
             0.08, 0.05,
-            "NOTE: AbuseIPDB reputation data is gathered from external threat intelligence feeds and is never stored permanently. "
-            "All lookup requests are performed securely through the backend proxy.",
+            "DISCLOSURE: Dynamic analysis is experimental and performed in a virtual emulator. "
+            "SHAP values reflect local statistical attribution for the normalized shares XGBoost model.",
             fontsize=7.5, color="#536273", wrap=True,
         )
         pdf.savefig(figure, bbox_inches="tight")
         plt.close(figure)
+
+        # Page 2: System call coverage and unmapped calls
+        lines2 = [
+            f"Trace Coverage: {coverage:.1%} of CICMalDroid2020 vocabulary observed ({dynamic_result.get('features_seen', 0)} mapped features)",
+            f"Total System Call Invocations: {syscall_count:,}",
+            f"Unmapped System Call Types: {len(unmapped)}",
+            "",
+            "Analysis Limitations & Capture Boundary:",
+            "  ? Tracing attached after process launch; startup & library init syscalls may be missed.",
+            "  ? CICMalDroid2020 was trained on 32-bit ARM Android; x86_64 emulator syscall frequencies differ.",
+            "  ? Automated Monkey UI events are pseudo-random and may not trigger evasive execution paths.",
+            "  ? High-frequency system calls (e.g. mprotect, socket) occur in benign JIT and networking operations.",
+            "",
+        ]
+        runtime_ti = dynamic_result.get("runtime_threat_intelligence", [])
+        if runtime_ti:
+            lines2.extend(["Runtime Network Threat Intelligence (Live Socket Destinations):"])
+            for entry in runtime_ti[:12]:
+                ip = entry.get("ip")
+                port = entry.get("port")
+                score = entry.get("abuse_score", 0)
+                isp = entry.get("isp") or "Unknown ISP"
+                country = entry.get("country") or "??"
+                lines2.append(f"  * {ip}:{port} | AbuseScore: {score}% | Country: {country} | {isp[:30]}")
+            lines2.append("")
+
+        if unmapped:
+            lines2.append("Most Frequent Unmapped System Calls:")
+            for sc, cnt in sorted(unmapped.items(), key=lambda x: -x[1])[:20]:
+                lines2.append(f"  ? {sc:25s} count: {cnt:,}")
+
+        for p_idx, page_lines in enumerate(_paginate_lines(lines2, lines_per_page=32)):
+            fig_p2 = plt.figure(figsize=(8.5, 11), dpi=140)
+            title = "RUNTIME COVERAGE AND ANALYSIS LIMITATIONS" + (f" (Page {p_idx + 2})" if p_idx > 0 else "")
+            fig_p2.text(0.08, 0.94, title, fontsize=14, fontweight="bold")
+            fig_p2.text(0.08, 0.88, "\n".join(page_lines), va="top", family="monospace",
+                         fontsize=7.5, linespacing=1.35)
+            fig_p2.text(
+                0.08, 0.05,
+                "NOTE: Dynamic analysis results are experimental and should be combined with static inspection findings.",
+                fontsize=7.5, color="#536273", wrap=True,
+            )
+            pdf.savefig(fig_p2, bbox_inches="tight")
+            plt.close(fig_p2)
 
     return output.getvalue()

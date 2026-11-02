@@ -1,9 +1,11 @@
 import glob
 import hashlib
+import json as _json
 import logging
 import os
 import re
 import shutil
+import sqlite3 as _sqlite3
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -51,6 +53,7 @@ DYNAMIC_MODEL = BASE_DIR / "dynamic_outputs_v2" / "dynamic_model.joblib"
 UPLOAD_DIR = BASE_DIR / ".api_uploads"
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 UPLOAD_TTL = timedelta(hours=1)
+JOB_DB_PATH = BASE_DIR / ".job_store.db"  # SQLite file for persistent dynamic job state
 
 # ---------------------------------------------------------------------------
 # Load root .env file securely before reading API key configuration
@@ -212,10 +215,143 @@ app.add_middleware(
 
 UPLOADS: dict[str, dict[str, Any]] = {}
 STATIC_RESULTS: dict[str, dict[str, Any]] = {}
-DYNAMIC_JOBS: dict[str, dict[str, Any]] = {}
 STATE_LOCK = threading.Lock()
 DYNAMIC_LOCK = threading.Lock()
 EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dynamic-analysis")
+
+
+# ---------------------------------------------------------------------------
+# Persistent SQLite-backed job store for dynamic analysis jobs.
+# Survives backend restarts; maintains all job metadata and result payloads.
+# ---------------------------------------------------------------------------
+class _JobStore:
+    """Thread-safe SQLite-backed store for dynamic analysis jobs.
+
+    Provides dict-like interface for backward compatibility with existing tests
+    and background workers, while persisting all metadata and results to SQLite.
+    On startup, any jobs that were left in 'queued' or 'running' state
+    are automatically marked as 'interrupted' because their workers no longer exist.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        self._db = str(db_path)
+        self._lock = threading.Lock()
+        self._init_db()
+        self._mark_interrupted_on_startup()
+
+    def _execute(self, query: str, params: tuple = ()):
+        with self._lock:
+            conn = _sqlite3.connect(self._db, check_same_thread=False)
+            conn.row_factory = _sqlite3.Row
+            try:
+                with conn:
+                    cur = conn.execute(query, params)
+                    return cur.fetchall()
+            finally:
+                conn.close()
+
+    def _execute_write(self, query: str, params: tuple = ()):
+        with self._lock:
+            conn = _sqlite3.connect(self._db, check_same_thread=False)
+            try:
+                with conn:
+                    conn.execute(query, params)
+            finally:
+                conn.close()
+
+    def _init_db(self) -> None:
+        self._execute_write("""
+            CREATE TABLE IF NOT EXISTS dynamic_jobs (
+                job_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                requested_seconds INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                error TEXT,
+                result_json TEXT
+            )
+        """)
+
+    def _mark_interrupted_on_startup(self) -> None:
+        """Mark queued/running jobs as interrupted since their workers no longer exist."""
+        self._execute_write(
+            "UPDATE dynamic_jobs SET status='interrupted', "
+            "error='Job was interrupted: the backend restarted while this job was active.' "
+            "WHERE status IN ('queued', 'running')"
+        )
+
+    def create(self, job: dict) -> None:
+        self._execute_write(
+            "INSERT OR REPLACE INTO dynamic_jobs (job_id, status, filename, requested_seconds, "
+            "created_at, started_at, completed_at, error, result_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                job["job_id"], job.get("status", "queued"), job.get("filename", "unknown.apk"),
+                job.get("requested_seconds", 30), job.get("created_at", _now().isoformat()),
+                job.get("started_at"), job.get("completed_at"),
+                job.get("error"),
+                _json.dumps(job["result"], default=str) if job.get("result") else None,
+            ),
+        )
+
+    def get(self, job_id: str) -> dict | None:
+        rows = self._execute(
+            "SELECT * FROM dynamic_jobs WHERE job_id = ?", (job_id,)
+        )
+        if not rows:
+            return None
+        d = dict(rows[0])
+        result_json = d.pop("result_json", None)
+        d["result"] = _json.loads(result_json) if result_json else None
+        return d
+
+    def update_status(self, job_id: str, status: str, **kwargs) -> None:
+        fields = ["status = ?"]
+        params: list = [status]
+        for key in ("started_at", "completed_at", "error"):
+            if key in kwargs:
+                fields.append(f"{key} = ?")
+                params.append(kwargs[key])
+        params.append(job_id)
+        self._execute_write(
+            f"UPDATE dynamic_jobs SET {', '.join(fields)} WHERE job_id = ?",
+            tuple(params),
+        )
+
+    def set_result(self, job_id: str, result: dict) -> None:
+        self._execute_write(
+            "UPDATE dynamic_jobs SET result_json = ? WHERE job_id = ?",
+            (_json.dumps(result, default=str), job_id),
+        )
+
+    # Dict-like compatibility for existing tests and code
+    def __getitem__(self, job_id: str) -> dict:
+        item = self.get(job_id)
+        if item is None:
+            raise KeyError(job_id)
+        return item
+
+    def __setitem__(self, job_id: str, job: dict) -> None:
+        if not isinstance(job, dict):
+            raise TypeError("job must be a dict")
+        job = dict(job)
+        job.setdefault("job_id", job_id)
+        self.create(job)
+
+    def __contains__(self, job_id: str) -> bool:
+        return self.get(job_id) is not None
+
+    def pop(self, job_id: str, default=None):
+        item = self.get(job_id)
+        if item is not None:
+            self._execute_write("DELETE FROM dynamic_jobs WHERE job_id = ?", (job_id,))
+            return item
+        return default
+
+
+DYNAMIC_JOBS = _JobStore(JOB_DB_PATH)
 
 ARTIFACTS: dict[str, tuple[str, str, str]] = {
     "static-test-results": ("static", "Held-out test results", "test_results.csv"),
@@ -491,6 +627,44 @@ async def upload_apk(file: UploadFile = File(...)) -> UploadResponse:
         raise HTTPException(status_code=413, detail="APK exceeds the 100 MiB upload limit.")
     if not contents.startswith(b"PK"):
         raise HTTPException(status_code=415, detail="The uploaded file is not a ZIP-based APK.")
+
+    import zipfile
+    import io as _io
+    _MAX_ZIP_ENTRIES = 2000
+    _MAX_UNCOMPRESSED_BYTES = 500 * 1024 * 1024  # 500 MiB uncompressed limit
+    _MAX_COMPRESSION_RATIO = 50.0
+    if zipfile.is_zipfile(_io.BytesIO(contents)):
+        try:
+            with zipfile.ZipFile(_io.BytesIO(contents)) as zf:
+                entries = zf.infolist()
+                if len(entries) > _MAX_ZIP_ENTRIES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"APK archive contains {len(entries)} entries (limit: {_MAX_ZIP_ENTRIES}). Possible ZIP bomb.",
+                    )
+                total_uncompressed = 0
+                for entry in entries:
+                    if entry.filename.startswith("/") or ".." in entry.filename:
+                        raise HTTPException(
+                            status_code=415,
+                            detail=f"APK entry '{entry.filename[:60]}' contains invalid path traversal characters.",
+                        )
+                    comp_size = entry.compress_size or 1
+                    if entry.file_size > 0 and (entry.file_size / comp_size) > _MAX_COMPRESSION_RATIO:
+                        raise HTTPException(
+                            status_code=415,
+                            detail=f"APK entry '{entry.filename[:60]}' has suspicious compression ratio ({entry.file_size / comp_size:.1f}x). Possible decompression bomb.",
+                        )
+                    total_uncompressed += entry.file_size
+                    if total_uncompressed > _MAX_UNCOMPRESSED_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"APK archive total uncompressed size exceeds limit ({_MAX_UNCOMPRESSED_BYTES // (1024*1024)} MiB).",
+                        )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=415, detail=f"APK archive validation failed: {exc}")
 
     upload_id = str(uuid.uuid4())
     path = UPLOAD_DIR / f"upload_{upload_id}.apk"
@@ -793,9 +967,10 @@ def download_static_report(analysis_id: str, format: str) -> Response:
 def _run_dynamic_job(job_id: str, apk_path: Path, filename: str, digest: str,
                      seconds: int, remove_upload: bool) -> None:
     with STATE_LOCK:
-        job = DYNAMIC_JOBS[job_id]
-        job["status"] = "running"
-        job["started_at"] = _now().isoformat()
+        DYNAMIC_JOBS.update_status(job_id, "running", started_at=_now().isoformat())
+        job = DYNAMIC_JOBS.get(job_id)
+        if job is None:
+            raise RuntimeError(f"Job {job_id} disappeared from store before it could start.")
     try:
         if Path.cwd().resolve() != BASE_DIR:
             raise RuntimeError(
@@ -840,6 +1015,32 @@ def _run_dynamic_job(job_id: str, apk_path: Path, filename: str, digest: str,
                 behavioral_anomalies.append(DynamicAnomalyExplanation(**anomaly_data))
                 explained_syscalls.add(sc)
 
+        # Runtime Threat Intelligence: query live destinations established during trace
+        runtime_ti = []
+        raw_conns = capture.get("runtime_connections", [])
+        abuse_key = get_configured_abuseipdb_key()
+        for conn in raw_conns[:10]:
+            ip = conn.get("ip")
+            port = conn.get("port")
+            if not ip:
+                continue
+            entry = {"ip": ip, "port": port, "status": "unqueried", "abuse_score": 0, "total_reports": 0, "isp": None, "country": None}
+            if abuse_key:
+                try:
+                    ip_data = static_engine.check_ip(ip, api_key=abuse_key, timeout=4)
+                    entry.update({
+                        "abuse_score": ip_data.get("abuse_score", 0),
+                        "total_reports": ip_data.get("total_reports", 0),
+                        "isp": ip_data.get("isp"),
+                        "country": ip_data.get("country"),
+                        "status": ip_data.get("status", "checked"),
+                    })
+                except Exception as e:
+                    entry["status"] = f"error: {str(e)[:50]}"
+            else:
+                entry["status"] = "unconfigured_key"
+            runtime_ti.append(entry)
+
         result = DynamicAnalysisResult(
             job_id=job_id,
             filename=filename,
@@ -849,6 +1050,10 @@ def _run_dynamic_job(job_id: str, apk_path: Path, filename: str, digest: str,
             actual_seconds=float(capture["seconds"]),
             decision_threshold=0.50,
             classifier_info="Dynamic XGBoost (Normalized Syscall Shares on CICMalDroid2020)",
+            # malware_probability = probability_normalized_shares (xgb_share drives verdict)
+            malware_probability=float(prediction["shares"]),
+            active_model="xgb_share",
+            verdict="MALWARE" if float(prediction["shares"]) >= 0.50 else "BENIGN",
             counts=counts,
             mapped_counts={str(k): int(v) for k, v in output["mapped"].items()},
             unmapped_counts={str(k): int(v) for k, v in output["unmapped"].items()},
@@ -859,6 +1064,7 @@ def _run_dynamic_job(job_id: str, apk_path: Path, filename: str, digest: str,
             probability_raw_counts=float(prediction["counts"]),
             shap_evidence=evidence,
             behavioral_anomalies=behavioral_anomalies,
+            runtime_threat_intelligence=runtime_ti,
             raw_report=str(capture.get("raw_text", "")),
             notice=(
                 "A model prediction is not definitive proof of malicious behavior. "
@@ -867,15 +1073,12 @@ def _run_dynamic_job(job_id: str, apk_path: Path, filename: str, digest: str,
             ),
         )
         with STATE_LOCK:
-            DYNAMIC_JOBS[job_id]["result"] = result.model_dump()
-            DYNAMIC_JOBS[job_id]["status"] = "completed"
-            DYNAMIC_JOBS[job_id]["completed_at"] = _now().isoformat()
+            DYNAMIC_JOBS.set_result(job_id, result.model_dump())
+            DYNAMIC_JOBS.update_status(job_id, "completed", completed_at=_now().isoformat())
     except Exception as exc:
         logger.exception("Dynamic analysis job %s failed", job_id)
         with STATE_LOCK:
-            DYNAMIC_JOBS[job_id]["status"] = "failed"
-            DYNAMIC_JOBS[job_id]["error"] = str(exc)
-            DYNAMIC_JOBS[job_id]["completed_at"] = _now().isoformat()
+            DYNAMIC_JOBS.update_status(job_id, "failed", error=str(exc)[:1000], completed_at=_now().isoformat())
     finally:
         if remove_upload:
             try:
@@ -934,18 +1137,13 @@ def start_dynamic_analysis(request: DynamicAnalysisRequest) -> DynamicAnalysisAc
             remove_upload = True
 
         job_id = str(uuid.uuid4())
-        with STATE_LOCK:
-            DYNAMIC_JOBS[job_id] = {
-                "job_id": job_id,
-                "status": "queued",
-                "filename": filename,
-                "requested_seconds": request.seconds,
-                "created_at": _now().isoformat(),
-                "started_at": None,
-                "completed_at": None,
-                "error": None,
-                "result": None,
-            }
+        DYNAMIC_JOBS.create({
+            "job_id": job_id,
+            "status": "queued",
+            "filename": filename,
+            "requested_seconds": request.seconds,
+            "created_at": _now().isoformat(),
+        })
         EXECUTOR.submit(
             _run_dynamic_job, job_id, apk_path, filename, digest,
             request.seconds, remove_upload,
@@ -963,33 +1161,31 @@ def start_dynamic_analysis(request: DynamicAnalysisRequest) -> DynamicAnalysisAc
 
 @app.get("/api/analyze/dynamic/{job_id}", response_model=DynamicJobStatus)
 def dynamic_job_status(job_id: str) -> DynamicJobStatus:
-    with STATE_LOCK:
-        job = DYNAMIC_JOBS.get(job_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail="Dynamic analysis job not found.")
-        return DynamicJobStatus(**{
-            key: job[key] for key in (
-                "job_id", "status", "filename", "requested_seconds",
-                "created_at", "started_at", "completed_at", "error",
-            )
-        })
+    job = DYNAMIC_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Dynamic analysis job not found.")
+    return DynamicJobStatus(**{
+        key: job[key] for key in (
+            "job_id", "status", "filename", "requested_seconds",
+            "created_at", "started_at", "completed_at", "error",
+        )
+    })
 
 
 @app.get("/api/analyze/dynamic/{job_id}/result", response_model=DynamicAnalysisResult)
 def dynamic_job_result(job_id: str) -> DynamicAnalysisResult:
-    with STATE_LOCK:
-        job = DYNAMIC_JOBS.get(job_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail="Dynamic analysis job not found.")
-        if job["status"] != "completed" or not job["result"]:
-            raise HTTPException(status_code=409, detail=f"Job result is not ready (status: {job['status']}).")
-        return DynamicAnalysisResult(**job["result"])
+    job = DYNAMIC_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Dynamic analysis job not found.")
+    if job["status"] != "completed" or not job.get("result"):
+        raise HTTPException(status_code=409, detail=f"Job result is not ready (status: {job['status']}).")
+    return DynamicAnalysisResult(**job["result"])
 
 
 @app.get("/api/analyze/dynamic/{job_id}/reports/{format}")
+@app.get("/api/analyze/dynamic/{job_id}/report/{format}")
 def download_dynamic_report(job_id: str, format: str) -> Response:
-    with STATE_LOCK:
-        job = DYNAMIC_JOBS.get(job_id)
+    job = DYNAMIC_JOBS.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Dynamic analysis job not found.")
     if job["status"] != "completed" or not job.get("result"):
@@ -1004,7 +1200,15 @@ def download_dynamic_report(job_id: str, format: str) -> Response:
             media_type="application/json",
             headers={"Content-Disposition": f'attachment; filename="{clean_stem}_dynamic_report.json"'},
         )
-    raise HTTPException(status_code=404, detail="Supported dynamic report format is json.")
+    if format == "pdf":
+        from backend.reports import build_dynamic_pdf_report
+        pdf_bytes = build_dynamic_pdf_report(result, job_info=job)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{clean_stem}_dynamic_report.pdf"'},
+        )
+    raise HTTPException(status_code=404, detail="Supported dynamic report formats are json and pdf.")
 
 
 @app.get("/api/research/benchmarks", response_model=list[ResearchGroup])
@@ -1077,4 +1281,3 @@ def research_artifact(artifact_id: str) -> Response:
         logger.exception("Could not read benchmark artifact %s", artifact_id)
         raise HTTPException(status_code=500, detail=f"Could not read saved benchmark data: {exc}") from exc
     return JSONResponse(payload)
-

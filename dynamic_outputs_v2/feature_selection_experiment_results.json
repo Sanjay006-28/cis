@@ -1,0 +1,44 @@
+{
+  "status": "completed",
+  "dataset": "feature_vectors_syscallsbinders_frequency_5_Cat.csv",
+  "n_samples": 11520,
+  "n_malware": 9729,
+  "n_benign": 1791,
+  "k_features": 50,
+  "n_folds": 5,
+  "evaluation_strategy": "cluster_held_out (GroupKFold on KMeans clusters)",
+  "condition_a_count_based_selection": {
+    "description": "Information Gain + Extra Trees on raw counts; XGBoost trained/tested on shares",
+    "mean_accuracy": 0.9159722222222222,
+    "std_accuracy": 0.028130893586889735,
+    "mean_f1": 0.9487990713063104,
+    "std_f1": 0.018225547035572772,
+    "mean_recall": 0.9291712387683713,
+    "std_recall": 0.03676473332187389,
+    "mean_specificity": 0.8485776676226019,
+    "std_specificity": 0.053632149458380574,
+    "mean_roc_auc": 0.9521840198037894,
+    "std_roc_auc": 0.022936963534787965
+  },
+  "condition_b_share_based_selection": {
+    "description": "Information Gain + Extra Trees directly on shares; XGBoost trained/tested on shares",
+    "mean_accuracy": 0.9302083333333334,
+    "std_accuracy": 0.022381697735393467,
+    "mean_f1": 0.9579189144615035,
+    "std_f1": 0.014395451637511082,
+    "mean_recall": 0.9474730218692358,
+    "std_recall": 0.02382044622505067,
+    "mean_specificity": 0.8387807199688788,
+    "std_specificity": 0.046312572252072276,
+    "mean_roc_auc": 0.9522369012069924,
+    "std_roc_auc": 0.026882966848351546
+  },
+  "statistical_comparison": {
+    "mcnemar_b": 190,
+    "mcnemar_c": 354,
+    "p_value": 1.901532497519582e-12,
+    "statistically_significant_at_05": true,
+    "feature_set_jaccard_similarity": 0.6949152542372882,
+    "common_features_count": 41
+  }
+}

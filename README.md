@@ -13,10 +13,12 @@ This project delivers a production-grade defense-in-depth architecture:
 1. **Static Analysis Engine (Drebin-215)**: Decompiles the APK safely in-memory (manifest & DEX bytecode), extracts 215 binary permissions, intent filters, sensitive API calls, and suspicious shell commands, and evaluates them using Random Forest and XGBoost.
 2. **Soft Voting Ensemble (98.14% Accuracy)**: Fuses probabilities across tree classifiers to minimize prediction variance and maximize detection robustness.
 3. **Local Explainable AI (SHAP) & Categorized Explanations**: Provides local interpretability for every analyzed APK using `shap.TreeExplainer`, paired with plain-language domain explanations, risk levels, and security context across Sensitive Permissions, Suspicious APIs, Intent Filters, and Shell Commands.
-4. **Threat Intelligence Enrichment (AbuseIPDB)**: Extracts embedded public IP addresses and domains from application bytecode, cross-references them against live cyber threat intelligence feeds, and provides an in-browser configuration panel with connection testing and transient session key support.
-5. **Live Dynamic Sandbox Emulation & Behavioral Anomalies (CICMalDroid2020 & strace)**: Automated runtime execution on a rooted Android emulator with UI monkey event fuzzing, capturing 139 Linux kernel system calls evaluated against Dynamic XGBoost and contextualized through behavioral anomaly analysis (Memory, Networking, Process Control).
-6. **Publication-Quality JSON Security Audit Reports**: Full schema-standardized audit report generation for SIEM/SOC export, capturing model parameters, local SHAP attributions, indicators, and threat intelligence with strict exclusion of credentials and API keys.
-7. **Web Presentation Layer**: React, TypeScript, and Vite frontend backed by FastAPI, with quick-start one-click launcher scripts and the existing Streamlit dashboard retained as a fallback.
+4. **Dual Threat Intelligence Enrichment (AbuseIPDB)**:
+   - **Static Threat Intelligence**: Extracts embedded public IP addresses and domains from application bytecode, querying reputation scores and filtering RFC 1918 private ranges.
+   - **Runtime Threat Intelligence**: Continuously probes `/proc/net/tcp` and `/proc/net/tcp6` during live sandbox execution, filters out emulator NAT/loopback routes (`10.0.2.x`, `127.0.0.1`), and correlates active outbound C2/network destinations against live AbuseIPDB feeds (abuse confidence %, ISP, country).
+5. **Live Dynamic Sandbox Emulation & Behavioral Anomalies (CICMalDroid2020 & strace)**: Automated runtime execution on a rooted Android emulator with UI monkey event fuzzing, capturing 139 Linux kernel system calls evaluated against Dynamic XGBoost (`xgb_share`) and contextualized through behavioral anomaly analysis (Memory, Networking, Process Control).
+6. **Publication-Quality JSON & PDF Security Audit Reports**: Full schema-standardized audit report generation for both static and dynamic analysis runs, capturing model parameters, local SHAP attributions, behavioral anomalies, runtime socket connections, and threat intelligence with strict exclusion of credentials and API keys.
+7. **Web Presentation Layer**: React, TypeScript, and Vite frontend backed by FastAPI, featuring intelligent port conflict resolution (auto-fallback to 8001 when 8000 is occupied, auto-reuse of active Vite sessions on port 5173), with the Streamlit dashboard retained as a fallback.
 
 ---
 
@@ -76,7 +78,7 @@ flowchart TD
         XGB --> SHAP[SHAP TreeExplainer\nLocal Feature Attribution]
     end
 
-    subgraph ThreatIntel["3. Runtime Threat Intelligence"]
+    subgraph ThreatIntel["3. Static Threat Intelligence"]
         Net --> DNS[Live Socket DNS Resolution]
         DNS --> AbuseAPI[AbuseIPDB Reputation API v2]
         AbuseAPI --> NetRisk[Network Risk Metric & Abuse Scores]
@@ -86,7 +88,9 @@ flowchart TD
         LiveAPK[APK File] --> ADB[Android Debug Bridge ADB]
         ADB --> Emulator[Rooted Android AVD + Monkey Fuzzer]
         Emulator --> Strace[strace -c -f -p PID]
+        Emulator --> NetProc["/proc/net/tcp Live Socket Telemetry"]
         Strace --> SysCalls[139 Linux Kernel System Calls]
+        NetProc --> AbuseAPIDyn["AbuseIPDB Runtime CTI"]
         SysCalls --> DynXGB[XGBoost Baseline: 97.31%]
         SysCalls --> DL[Deep Learning: TCN / BiLSTM / Transformer]
         DynXGB & DL --> ClusterCV[Cluster-Held-Out Evaluation]
@@ -96,9 +100,11 @@ flowchart TD
         Ensemble --> UI[Streamlit Web App app.py]
         SHAP --> UI
         NetRisk --> UI
+        AbuseAPIDyn --> UI
+        AbuseAPIDyn --> React
         ClusterCV --> UI
         DynXGB --> UI
-        UI --> Export[JSON Security Audit Report Export]
+        UI --> Export[JSON & PDF Security Audit Reports]
         Ensemble --> API[FastAPI API]
         API --> React[React + TypeScript frontend]
     end
@@ -138,9 +144,12 @@ Pairwise McNemar hypothesis tests with Bonferroni correction ($\alpha = 0.05/3$)
 
 ```text
 ├── app.py                                                # Existing Streamlit fallback dashboard
-├── start_web.bat                                         # All-in-one launcher for React frontend & FastAPI backend
+├── start_all.bat / run.bat                               # Intelligent all-in-one launcher (auto-resolves port conflicts)
+├── backend_server.bat                                    # Dedicated launcher for FastAPI backend
+├── frontend_server.bat                                   # Dedicated launcher for React / Vite frontend
 ├── stop_servers.bat                                      # One-click script to terminate FastAPI and Vite servers
 ├── start_streamlit.bat                                   # One-click launcher for the Streamlit dashboard
+├── check_service.py                                      # Service health, port inspection & binding resolution utility
 ├── backend/                                              # FastAPI REST API service
 │   ├── __init__.py                                       # Package marker
 │   ├── main.py                                           # FastAPI application routes, jobs & readiness logic
@@ -158,9 +167,10 @@ Pairwise McNemar hypothesis tests with Bonferroni correction ($\alpha = 0.05/3$)
 │       ├── pages/                                        # Overview, Analyze, Dynamic, Environment, Research, About
 │       ├── types.ts                                      # TypeScript domain models and API contracts
 │       └── styles.css                                    # Design system, cyber badges, and security status styling
-├── tests/                                                # Automated test suite (68 tests)
+├── tests/                                                # Automated test suite (121 tests)
 │   ├── test_api_contract.py                              # Backend API contract, readiness & validation tests
-│   └── test_features_explanations_reports.py             # AbuseIPDB mocking, credential exclusion & report schema tests
+│   ├── test_features_explanations_reports.py             # AbuseIPDB mocking, credential exclusion & report schema tests
+│   └── test_audit_fixes_comprehensive.py                 # Comprehensive audit fixes, runtime CTI, PDF & alias tests
 ├── phase3_live_demo.py                                   # Static analysis engine, feature extractor & AbuseIPDB client
 ├── phase5_live_capture.py                                # Dynamic strace capture pipeline via ADB & Android emulator
 ├── requirements.txt                                      # Python dependencies
@@ -242,8 +252,10 @@ For convenience on Windows systems, preconfigured batch scripts manage the lifec
 
 | Script | Purpose | Description |
 | :--- | :--- | :--- |
-| `start_web.bat` | **Start All Web Services** | Launches the FastAPI backend (`http://localhost:8000`) and React frontend (`http://localhost:5173`) in independent terminal windows. |
-| `stop_servers.bat` | **Stop All Web Services** | Terminate all active Node/Vite, Uvicorn, and Python server processes on ports 8000 and 5173. |
+| `start_all.bat` / `run.bat` | **Intelligent All-in-One Launcher** | Detects port conflicts on port 8000 (falls back to 8001 if occupied), launches FastAPI, verifies/reuses existing Vite sessions on 5173, and launches browser. |
+| `backend_server.bat` | **FastAPI Backend Server** | Starts the FastAPI backend independently on the resolved port (8000 or 8001). |
+| `frontend_server.bat` | **React Frontend Server** | Starts the Vite dev server (`http://localhost:5173`) with `VITE_API_PROXY_TARGET` preconfigured. |
+| `stop_servers.bat` | **Stop All Web Services** | Gracefully terminates active Node/Vite and Uvicorn server processes on project ports. |
 | `start_streamlit.bat` | **Launch Streamlit Fallback** | Launches the original Streamlit dashboard (`http://localhost:8501`) inside the virtual environment. |
 
 ---
@@ -370,7 +382,14 @@ fi
 ## 🛡️ Safety & Research Disclosures
 
 - **Static Safety**: The static analyzer only inspects the APK container (like reading a zip archive). The target APK is never installed or executed on the host system.
-- **Dynamic Isolation**: Dynamic emulation executes applications strictly inside an isolated Android emulator sandbox. Never execute unverified APKs on physical production devices.
+- **Dynamic Isolation & Emulator Networking Architecture**:
+  - **Virtual Network Topology**: The Android emulator operates within a QEMU-based virtual NAT router (`10.0.2.1`), with DNS resolution provided at `10.0.2.3`, and the host workstation accessible at the alias IP `10.0.2.2`.
+  - **Host Exposure Boundary**: Any service on the host workstation listening on `0.0.0.0` or host network interfaces can be reached by untrusted APKs executing inside the emulator via `10.0.2.2`. For security, ensure all sensitive host development services (databases, SSH, local dev APIs) bind strictly to `127.0.0.1` rather than `0.0.0.0`.
+  - **Recommended Isolation Setup**:
+    1. *Dedicated Analysis AVD*: Use a dedicated Virtual Device built on a "Google APIs" x86_64 image (root-enabled via `adb root`), never a personal or Google Play-enabled AVD.
+    2. *Clean Snapshot Rollback*: Revert to a clean snapshot between untrusted APK runs (`emulator @AVD -snapshot clean_state -no-snapshot-save`).
+    3. *Host Service Separation*: Do not run production or credentialed services on the same host interface during dynamic execution.
+    4. *Sandbox Limitations*: The emulator provides execution sandboxing and system-call isolation, but is not an impenetrable hardware air-gap. Advanced malware with hypervisor-aware evasion or anti-debugging mechanisms may alter its behavior when virtualized environments are detected.
 - **Academic Context**: Static models were trained on the Drebin-215 dataset; dynamic models were trained on CICMalDroid2020. Predictions provide probabilistic decision support and should be paired with human review.
 
 ---
@@ -462,8 +481,8 @@ FastAPI exposes typed REST endpoints documented with OpenAPI / Swagger UI at `/d
 | `GET` | `/api/analysis/{analysis_id}/reports/{format}` | Download static security audit report (`json` or `pdf` formats). |
 | `POST` | `/api/analyze/dynamic` | Queue asynchronous dynamic emulation in rooted AVD (requires explicit confirmation). |
 | `GET` | `/api/analyze/dynamic/{job_id}` | Query dynamic job state (`queued`, `running`, `completed`, `failed`). |
-| `GET` | `/api/analyze/dynamic/{job_id}/result` | Retrieve completed dynamic analysis result with syscall counts, SHAP values, and behavioral anomalies. |
-| `GET` | `/api/analyze/dynamic/{job_id}/report/{format}` | Download dynamic execution security audit report (`json` format). |
+| `GET` | `/api/analyze/dynamic/{job_id}/result` | Retrieve completed dynamic analysis result with syscall counts, SHAP values, behavioral anomalies, and runtime threat intelligence. |
+| `GET` | `/api/analyze/dynamic/{job_id}/reports/{format}` | Download dynamic execution security audit report (`json` or `pdf` formats). |
 | `GET` | `/api/research/benchmarks` | List benchmark groups (static & dynamic) and available artifact identifiers. |
 | `GET` | `/api/research/benchmarks/tables` | Return all benchmark tabular CSV results in structured JSON format. |
 | `GET` | `/api/research/benchmarks/artifacts/{artifact_id}` | Serve benchmark plots (`image/png`) or structured data tables. |
@@ -472,16 +491,16 @@ FastAPI exposes typed REST endpoints documented with OpenAPI / Swagger UI at `/d
 
 ## 🧪 Testing & Validation Procedure
 
-The project includes an automated test suite of **68 unit and integration tests**, Python syntax validation, and frontend production builds.
+The project includes an automated test suite of **121 unit and integration tests**, Python syntax validation, and frontend production builds.
 
 ### 1. Python Syntax Compilation Check
 Verify all backend source files, CLI tools, and tests compile without syntax errors:
 ```powershell
-python -m py_compile app.py phase3_live_demo.py phase5_live_capture.py backend/main.py backend/reports.py backend/schemas.py backend/explanations.py backend/__init__.py tests/test_api_contract.py tests/test_features_explanations_reports.py
+python -m py_compile app.py phase3_live_demo.py phase5_live_capture.py backend/main.py backend/reports.py backend/schemas.py backend/explanations.py backend/__init__.py tests/test_api_contract.py tests/test_features_explanations_reports.py tests/test_audit_fixes_comprehensive.py check_service.py
 ```
 
-### 2. Backend Unit & Regression Test Suite (68 Tests)
-Run the full test suite covering API contracts, AbuseIPDB mocking (success, 401, 429, timeout), credential sanitization, JSON schema compliance, and dynamic anomaly classifications:
+### 2. Backend Unit & Regression Test Suite (121 Tests)
+Run the full test suite covering API contracts, AbuseIPDB mocking (success, 401, 429, timeout), credential sanitization, JSON schema compliance, dynamic anomaly classifications, live socket telemetry parsing, and PDF report generation:
 ```powershell
 python -m unittest discover -s tests -p "test_*.py"
 ```
@@ -493,6 +512,9 @@ python -m unittest tests/test_api_contract.py
 
 # Threat intelligence, explanations & report tests (53 tests)
 python -m unittest tests/test_features_explanations_reports.py
+
+# Comprehensive audit fixes, runtime CTI, PDF & syscall alias tests (53 tests)
+python -m unittest tests/test_audit_fixes_comprehensive.py
 ```
 
 ### 3. React Frontend Production Build
