@@ -788,7 +788,42 @@ Each application was executed inside the hardened `emulator-5554` runtime sandbo
 
 ---
 
-### 3. Real-World Findings: Why Defense-in-Depth Is Essential
+### 3. Dual Threat Intelligence Benchmark Across Tested Applications
+
+Sentinel enriches every sample with dual-source threat intelligence:
+1. **Static Threat Intelligence:** RegEx mining of DEX bytecode for public IPv4 addresses and fully-qualified domain names (FQDNs), cross-checked against AbuseIPDB and URLhaus with RFC 1918 / ASN.1 OID filtering.
+2. **Runtime Threat Intelligence:** Real-time polling of `/proc/net/tcp` and `/proc/net/tcp6` during live sandbox execution, resolving remote public IP endpoints and querying live AbuseIPDB feeds (abuse confidence score, ISP, country, reporting history).
+
+#### A. Static Bytecode Threat Intelligence
+| Application Name | Package Name | Embedded Public IPs | Embedded Domains | AbuseIPDB Lookups | URLhaus Lookups | Threat Status & Key Domains Identified |
+| :--- | :--- | :---: | :---: | :---: | :---: | :--- |
+| **F-Droid Client** | `org.fdroid.fdroid` | 13 | 24 | 13 | 37 | **Clean (0% Abuse)**; official repository mirrors (`f-droid.org`, `fdroid.link`, `4everland.io`) |
+| **Breezy Weather** | `org.breezyweather` | 0 | 50 | 0 | 50 | **Clean (0% Abuse)**; meteorological APIs (`open-meteo.com`, `brightsky.dev`, `knmi.cloud`) |
+| **Feeder RSS Reader** | `com.nononsenseapps.feeder` | 0 | 25 | 0 | 25 | **Clean (0% Abuse)**; RSS feed sync endpoints (`feeder-sync.nononsenseapps.com`, `deepl.com`) |
+| **AntennaPod** | `de.danoeh.antennapod` | 0 | 20 | 0 | 20 | **Clean (0% Abuse)**; podcast directory APIs (`podlove.org`, `fyyd.de`, `itunes.com`) |
+| **Organic Maps** | `app.organicmaps` | 0 | 7 | 0 | 7 | **Clean (0% Abuse)**; open map data endpoints (`openstreetmap.org`, `osm.org`, `matrix.to`) |
+| **Wikipedia** | `org.wikipedia` | 0 | 31 | 0 | 31 | **Clean (0% Abuse)**; Wikimedia foundation infrastructure (`wikimedia.org`, `mediawiki.org`) |
+| **SpyNote RAT (Malware)** | `com.appd.instll.load` | 0 *(Encrypted)* | 0 *(Encrypted)* | 0 | 0 | **Static Evasion:** Trojan bytecode packed within encrypted assets; zero raw indicators accessible via static parsing |
+
+#### B. Runtime Network Threat Intelligence (Active Sockets via `/proc/net/tcp`)
+| Application Name | Package Name | Active Sockets Captured | Observed Destination IP & Port | ISP / Organization | Country | Abuse Confidence | Live Status & Threat Attribution |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| **SpyNote RAT (Malware)** | `com.appd.instll.load` | 1 Active Socket | `172.217.113.4:443` | Google LLC | US | **0% (476 reports)** | **Checked (Clean OS Check-in)**; Trojan's outbound C2 connection attempts dropped by `SENTINEL_ISOLATION` firewall |
+| **F-Droid Client** | `org.fdroid.fdroid` | 2 Active Sockets | `142.251.150.119:443`<br>`172.217.113.4:443` | Google LLC | US | **0% (238 / 475 reports)** | Checked (Android OS / GMS push telemetry); 0% abuse score |
+| **Breezy Weather** | `org.breezyweather` | 2 Active Sockets | `142.251.150.119:443`<br>`172.217.113.4:443` | Google LLC | US | **0% (238 / 475 reports)** | Checked (GMS background synchronization); 0% abuse score |
+| **Feeder RSS Reader** | `com.nononsenseapps.feeder` | 2 Active Sockets | `142.251.150.119:443`<br>`172.217.113.4:443` | Google LLC | US | **0% (238 / 475 reports)** | Checked (GMS background synchronization); 0% abuse score |
+| **AntennaPod** | `de.danoeh.antennapod` | 2 Active Sockets | `142.251.150.119:443`<br>`172.217.113.4:443` | Google LLC | US | **0% (238 / 475 reports)** | Checked (GMS background synchronization); 0% abuse score |
+| **Organic Maps** | `app.organicmaps` | 2 Active Sockets | `142.251.150.119:443`<br>`172.217.113.4:443` | Google LLC | US | **0% (238 / 475 reports)** | Checked (GMS background synchronization); 0% abuse score |
+| **Wikipedia** | `org.wikipedia` | 2 Active Sockets | `142.251.150.119:443`<br>`172.217.113.4:443` | Google LLC | US | **0% (238 / 475 reports)** | Checked (GMS background synchronization); 0% abuse score |
+
+#### Technical Attribution & Containment Principles:
+* **Operating System Telemetry Baseline:** Sockets are sampled system-wide from `/proc/net/tcp` and `/proc/net/tcp6`. In an Android 14 Virtual Device with Google Play Services (GMS), core background daemons routinely establish HTTPS sync connections to Google Cloud blocks (`142.251.x.x` and `172.217.x.x`).
+* **Automated Threat Intelligence Corroboration:** Sentinel automatically cross-checks destination IPs with live AbuseIPDB threat feeds, confirming legitimate infrastructure (0% abuse confidence) vs rogue command-and-control servers (>= 50% abuse confidence).
+* **Sandboxed Egress Prevention:** Real-world malware (like SpyNote RAT) triggers outbound raw socket syscalls (`sendto`, `connect`), but guest-level iptables isolation rules (`SENTINEL_ISOLATION`) intercept and drop unauthorized egress, guaranteeing zero data exfiltration or host network exposure during testing.
+
+---
+
+### 4. Real-World Findings: Why Defense-in-Depth Is Essential
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
