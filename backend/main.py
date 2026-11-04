@@ -630,41 +630,44 @@ async def upload_apk(file: UploadFile = File(...)) -> UploadResponse:
 
     import zipfile
     import io as _io
-    _MAX_ZIP_ENTRIES = 2000
+    _MAX_ZIP_ENTRIES = 10000
     _MAX_UNCOMPRESSED_BYTES = 500 * 1024 * 1024  # 500 MiB uncompressed limit
     _MAX_COMPRESSION_RATIO = 50.0
-    if zipfile.is_zipfile(_io.BytesIO(contents)):
-        try:
-            with zipfile.ZipFile(_io.BytesIO(contents)) as zf:
-                entries = zf.infolist()
-                if len(entries) > _MAX_ZIP_ENTRIES:
+
+    if not zipfile.is_zipfile(_io.BytesIO(contents)):
+        raise HTTPException(status_code=415, detail="APK archive is corrupted or not a valid ZIP format.")
+
+    try:
+        with zipfile.ZipFile(_io.BytesIO(contents)) as zf:
+            entries = zf.infolist()
+            if len(entries) > _MAX_ZIP_ENTRIES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"APK archive contains {len(entries)} entries (limit: {_MAX_ZIP_ENTRIES}). Possible ZIP bomb.",
+                )
+            total_uncompressed = 0
+            for entry in entries:
+                if entry.filename.startswith(("/", "\\")) or ".." in entry.filename or ":\\" in entry.filename:
+                    raise HTTPException(
+                        status_code=415,
+                        detail=f"APK entry '{entry.filename[:60]}' contains invalid path traversal characters.",
+                    )
+                comp_size = entry.compress_size or 1
+                if entry.file_size > 0 and (entry.file_size / comp_size) > _MAX_COMPRESSION_RATIO:
+                    raise HTTPException(
+                        status_code=415,
+                        detail=f"APK entry '{entry.filename[:60]}' has suspicious compression ratio ({entry.file_size / comp_size:.1f}x). Possible decompression bomb.",
+                    )
+                total_uncompressed += entry.file_size
+                if total_uncompressed > _MAX_UNCOMPRESSED_BYTES:
                     raise HTTPException(
                         status_code=413,
-                        detail=f"APK archive contains {len(entries)} entries (limit: {_MAX_ZIP_ENTRIES}). Possible ZIP bomb.",
+                        detail=f"APK archive total uncompressed size exceeds limit ({_MAX_UNCOMPRESSED_BYTES // (1024*1024)} MiB).",
                     )
-                total_uncompressed = 0
-                for entry in entries:
-                    if entry.filename.startswith("/") or ".." in entry.filename:
-                        raise HTTPException(
-                            status_code=415,
-                            detail=f"APK entry '{entry.filename[:60]}' contains invalid path traversal characters.",
-                        )
-                    comp_size = entry.compress_size or 1
-                    if entry.file_size > 0 and (entry.file_size / comp_size) > _MAX_COMPRESSION_RATIO:
-                        raise HTTPException(
-                            status_code=415,
-                            detail=f"APK entry '{entry.filename[:60]}' has suspicious compression ratio ({entry.file_size / comp_size:.1f}x). Possible decompression bomb.",
-                        )
-                    total_uncompressed += entry.file_size
-                    if total_uncompressed > _MAX_UNCOMPRESSED_BYTES:
-                        raise HTTPException(
-                            status_code=413,
-                            detail=f"APK archive total uncompressed size exceeds limit ({_MAX_UNCOMPRESSED_BYTES // (1024*1024)} MiB).",
-                        )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(status_code=415, detail=f"APK archive validation failed: {exc}")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=415, detail=f"APK archive validation failed: {exc}")
 
     upload_id = str(uuid.uuid4())
     path = UPLOAD_DIR / f"upload_{upload_id}.apk"
@@ -964,13 +967,73 @@ def download_static_report(analysis_id: str, format: str) -> Response:
     raise HTTPException(status_code=404, detail="Supported report formats are json, pdf, and csv.")
 
 
+JOB_STAGES: dict[str, str] = {}
+
+
+def verify_dynamic_preconditions(target_device: str, apk_path: Path) -> None:
+    """Strict server-side security checks enforced immediately before emulator execution.
+    Rejects any job that does not strictly satisfy sandbox boundaries.
+    """
+    if not DYNAMIC_MODEL.is_file():
+        raise RuntimeError("Dynamic ML model bundle is not available.")
+
+    code, out, err = dynamic_engine.adb("devices", timeout=10)
+    if code != 0:
+        raise RuntimeError(f"ADB devices call failed: {err or out}")
+    lines = [ln.strip() for ln in out.splitlines()[1:] if ln.strip()]
+    devices = [ln.split()[0] for ln in lines if ln.split()[-1] == "device"]
+    if len(devices) != 1 or devices[0] != target_device:
+        raise RuntimeError(
+            f"Security preflight failed: expected exactly 1 emulator '{target_device}', "
+            f"found {devices}. Physical devices and unverified emulators are rejected."
+        )
+
+    code, rel, _ = dynamic_engine.sh("getprop ro.build.version.release", device=target_device)
+    code, abi, _ = dynamic_engine.sh("getprop ro.product.cpu.abi", device=target_device)
+    rel = rel.strip()
+    abi = abi.strip()
+    if rel != "14" or abi != "x86_64":
+        raise RuntimeError(
+            f"Unsupported sandbox target: Android {rel} ({abi}). "
+            "Dedicated sandbox requires Android 14 x86_64."
+        )
+
+    dynamic_engine.adb("root", device=target_device)
+    code, id_out, _ = dynamic_engine.sh("id", device=target_device)
+    if "uid=0" not in id_out:
+        raise RuntimeError(f"Root check failed on {target_device}: {id_out}. uid=0 is required for strace kernel tracing.")
+    strace = dynamic_engine.find_strace(target_device)
+    if not strace:
+        raise RuntimeError(f"strace binary not found on dedicated emulator {target_device}.")
+
+    code, iso_out, _ = dynamic_engine.sh("iptables -L SENTINEL_ISOLATION -n 2>/dev/null", device=target_device)
+    if code != 0 or "REJECT" not in iso_out or "10.0.2.2" not in iso_out:
+        raise RuntimeError(
+            "Host isolation check failed: SENTINEL_ISOLATION chain is missing or not rejecting host 10.0.2.2 on emulator."
+        )
+
+    if not apk_path.is_file():
+        raise RuntimeError(f"Target APK file not found: {apk_path}")
+    if apk_path.stat().st_size > MAX_UPLOAD_BYTES:
+        raise RuntimeError(f"APK size ({apk_path.stat().st_size} bytes) exceeds limit of {MAX_UPLOAD_BYTES} bytes.")
+    package = dynamic_engine.package_name(str(apk_path))
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+", package):
+        raise ValueError(f"Package name '{package}' is invalid for safe execution.")
+
+
 def _run_dynamic_job(job_id: str, apk_path: Path, filename: str, digest: str,
                      seconds: int, remove_upload: bool) -> None:
     with STATE_LOCK:
         DYNAMIC_JOBS.update_status(job_id, "running", started_at=_now().isoformat())
+        JOB_STAGES[job_id] = "Checking environment"
         job = DYNAMIC_JOBS.get(job_id)
         if job is None:
             raise RuntimeError(f"Job {job_id} disappeared from store before it could start.")
+
+    def report_stage(st: str):
+        with STATE_LOCK:
+            JOB_STAGES[job_id] = st
+
     try:
         if Path.cwd().resolve() != BASE_DIR:
             raise RuntimeError(
@@ -982,14 +1045,17 @@ def _run_dynamic_job(job_id: str, apk_path: Path, filename: str, digest: str,
             raise RuntimeError(
                 "ADB executable or wrapper was not found. Expected wrapper at /home/ashwith/bin/adb or set ADB_PATH."
             )
-        package = dynamic_engine.package_name(str(apk_path))
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+", package):
-            raise ValueError("The APK package name is not valid for safe emulator command construction.")
+        target_device = "emulator-5554"
+        report_stage("Checking environment")
+        verify_dynamic_preconditions(target_device, apk_path)
+
         output = dynamic_engine.analyze_dynamic(
             os.path.relpath(apk_path, BASE_DIR),
             seconds=seconds,
             bundle_path=str(DYNAMIC_MODEL),
+            device=target_device,
             verbose=False,
+            on_stage=report_stage,
         )
         capture = output["result"]
         prediction = output["prediction"]
@@ -1027,7 +1093,7 @@ def _run_dynamic_job(job_id: str, apk_path: Path, filename: str, digest: str,
             entry = {"ip": ip, "port": port, "status": "unqueried", "abuse_score": 0, "total_reports": 0, "isp": None, "country": None}
             if abuse_key:
                 try:
-                    ip_data = static_engine.check_ip(ip, api_key=abuse_key, timeout=4)
+                    ip_data = check_ip(ip, api_key=abuse_key, timeout=4)
                     entry.update({
                         "abuse_score": ip_data.get("abuse_score", 0),
                         "total_reports": ip_data.get("total_reports", 0),
@@ -1075,10 +1141,12 @@ def _run_dynamic_job(job_id: str, apk_path: Path, filename: str, digest: str,
         with STATE_LOCK:
             DYNAMIC_JOBS.set_result(job_id, result.model_dump())
             DYNAMIC_JOBS.update_status(job_id, "completed", completed_at=_now().isoformat())
+            JOB_STAGES[job_id] = "Completed"
     except Exception as exc:
         logger.exception("Dynamic analysis job %s failed", job_id)
         with STATE_LOCK:
             DYNAMIC_JOBS.update_status(job_id, "failed", error=str(exc)[:1000], completed_at=_now().isoformat())
+            JOB_STAGES[job_id] = "Failed"
     finally:
         if remove_upload:
             try:
@@ -1164,12 +1232,14 @@ def dynamic_job_status(job_id: str) -> DynamicJobStatus:
     job = DYNAMIC_JOBS.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Dynamic analysis job not found.")
-    return DynamicJobStatus(**{
+    d = {
         key: job[key] for key in (
             "job_id", "status", "filename", "requested_seconds",
             "created_at", "started_at", "completed_at", "error",
         )
-    })
+    }
+    d["stage"] = JOB_STAGES.get(job_id, job["status"])
+    return DynamicJobStatus(**d)
 
 
 @app.get("/api/analyze/dynamic/{job_id}/result", response_model=DynamicAnalysisResult)

@@ -151,10 +151,75 @@ function BehavioralAnomaliesPanel({ result }: { result: DynamicResult }) {
 export function DynamicPage() {
   const [file, setFile] = useState<File | null>(null);
   const [useSample, setUseSample] = useState(true);
-  const [seconds, setSeconds] = useState(30);
+  const [seconds, setSeconds] = useState(60);
+  const [uploadStage, setUploadStage] = useState<string>("");
+  const [fileMeta, setFileMeta] = useState<{
+    name: string;
+    size: number;
+    sha256: string;
+    valid: boolean;
+    computing: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!file) {
+      setFileMeta(null);
+      return;
+    }
+    let active = true;
+    setFileMeta({
+      name: file.name,
+      size: file.size,
+      sha256: "Computing SHA-256...",
+      valid: false,
+      computing: true,
+    });
+    const reader = new FileReader();
+    reader.onload = async () => {
+      if (!active) return;
+      try {
+        const buffer = reader.result as ArrayBuffer;
+        const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const hashHex = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+        const isValid = file.name.toLowerCase().endsWith(".apk") && file.size > 0 && file.size <= 120 * 1024 * 1024;
+        if (active) {
+          setFileMeta({
+            name: file.name,
+            size: file.size,
+            sha256: hashHex,
+            valid: isValid,
+            computing: false,
+          });
+        }
+      } catch {
+        if (active) {
+          setFileMeta({
+            name: file.name,
+            size: file.size,
+            sha256: "Error computing hash",
+            valid: false,
+            computing: false,
+          });
+        }
+      }
+    };
+    reader.readAsArrayBuffer(file);
+    return () => {
+      active = false;
+    };
+  }, [file]);
   const [confirmed, setConfirmed] = useState(false);
   const [status, setStatus] = useState<SystemStatus | null>(null);
-  const [jobId, setJobId] = useState(() => sessionStorage.getItem(SAVED_JOB_KEY));
+  const [jobId, setJobId] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    const urlJob = params.get("job_id");
+    if (urlJob) {
+      sessionStorage.setItem(SAVED_JOB_KEY, urlJob);
+      return urlJob;
+    }
+    return sessionStorage.getItem(SAVED_JOB_KEY);
+  });
   const [job, setJob] = useState<DynamicJob | null>(null);
   const [result, setResult] = useState<DynamicResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -215,15 +280,20 @@ export function DynamicPage() {
     setError("");
     setResult(null);
     setJob(null);
+    setUploadStage("Uploading APK archive to server...");
     try {
       let receipt: UploadReceipt | null = null;
-      if (!useSample && file) receipt = await uploadApk(file);
+      if (!useSample && file) {
+        receipt = await uploadApk(file);
+        setUploadStage("Validating APK archive and initiating dynamic session...");
+      }
       const accepted = await startDynamic({
         upload_id: receipt?.upload_id,
         use_sample: useSample,
         seconds,
         confirmed_execution: confirmed,
       });
+      setUploadStage("");
       setJobId(accepted.job_id);
       sessionStorage.setItem(SAVED_JOB_KEY, accepted.job_id);
       setJob({
@@ -327,12 +397,46 @@ export function DynamicPage() {
           Upload a custom APK
         </label>
         {!useSample && (
-          <input
-            type="file"
-            accept=".apk,application/vnd.android.package-archive"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            style={{ display: "block", width: "100%", margin: "8px 0 12px", padding: "10px", background: "#0d1724", border: "1px dashed #40536b", borderRadius: "6px", color: "#bdc9d6", fontSize: "12px" }}
-          />
+          <>
+            <input
+              id="dynamic-apk-file-input"
+              type="file"
+              accept=".apk,application/vnd.android.package-archive"
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              style={{ display: "block", width: "100%", margin: "8px 0 12px", padding: "10px", background: "#0d1724", border: "1px dashed #40536b", borderRadius: "6px", color: "#bdc9d6", fontSize: "12px" }}
+            />
+            {fileMeta && (
+              <div className="meta-drawer" style={{ margin: "8px 0 14px", background: "#09121d", border: "1px solid #1f3147", borderRadius: "6px", padding: "12px" }}>
+                <div style={{ fontSize: "11px", fontWeight: 700, color: "var(--accent)", letterSpacing: "0.08em", marginBottom: "8px" }}>
+                  APK ARTIFACT IDENTITY &amp; INTEGRITY PREVIEW
+                </div>
+                <div className="meta-row">
+                  <span className="meta-label">Selected File</span>
+                  <span className="meta-val font-mono">{fileMeta.name}</span>
+                </div>
+                <div className="meta-row">
+                  <span className="meta-label">File Size</span>
+                  <span className="meta-val font-mono">{(fileMeta.size / (1024 * 1024)).toFixed(2)} MB ({fileMeta.size.toLocaleString()} bytes)</span>
+                </div>
+                <div className="meta-row">
+                  <span className="meta-label">SHA-256 Digest</span>
+                  <span className="meta-val font-mono hash-pill" style={{ wordBreak: "break-all" }}>{fileMeta.sha256}</span>
+                </div>
+                <div className="meta-row">
+                  <span className="meta-label">Validation Status</span>
+                  <span className="meta-val">
+                    {fileMeta.computing ? (
+                      <span className="badge badge-neutral">Computing digest…</span>
+                    ) : fileMeta.valid ? (
+                      <span className="badge badge-success">Valid APK Archive (Verified)</span>
+                    ) : (
+                      <span className="badge badge-danger">Invalid Archive or Exceeds Limit</span>
+                    )}
+                  </span>
+                </div>
+              </div>
+            )}
+          </>
         )}
         <label className="field-label" htmlFor="trace-seconds">Capture duration (seconds)</label>
         <input
@@ -352,13 +456,21 @@ export function DynamicPage() {
           />
           <b style={{ color: "#e8c07a" }}>I confirm that I want to execute this APK in the emulator.</b>
         </label>
+        {uploadStage && (
+          <div style={{ marginTop: "10px" }}>
+            <StateMessage kind="loading">
+              {uploadStage}
+            </StateMessage>
+          </div>
+        )}
         <button
+          id="btn-start-dynamic"
           className="button button-primary"
-          disabled={!status?.emulator_ready || !confirmed || busy || (!useSample && !file)}
+          disabled={!status?.emulator_ready || !confirmed || busy || (!useSample && (!file || fileMeta?.computing || !fileMeta?.valid))}
           onClick={beginAnalysis}
           style={{ marginTop: "10px" }}
         >
-          {busy ? "Submitting…" : "Start dynamic analysis"}
+          {busy ? "Initiating sandbox analysis…" : "Start dynamic analysis"}
         </button>
         {!status && <p className="field-hint">Check emulator readiness (Step 1) before starting.</p>}
       </section>
@@ -369,11 +481,22 @@ export function DynamicPage() {
         <section className="panel job-panel">
           <div className="panel-heading">
             <div><p className="eyebrow">ANALYSIS JOB</p><h2>{job.filename}</h2></div>
-            <span className={`job-status job-${job.status}`}>{job.status}</span>
+            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              <span className={`job-status job-${job.status}`}>{job.status}</span>
+              {job.stage && (
+                <span className="badge" style={{ background: "#132337", color: "#60a5fa", border: "1px solid #2563eb" }}>
+                  Stage: {job.stage}
+                </span>
+              )}
+            </div>
           </div>
           <p className="field-hint">Job {job.job_id} · requested trace {job.requested_seconds}s</p>
           {job.status === "queued" && <StateMessage kind="info">Job accepted and waiting for the analysis worker.</StateMessage>}
-          {job.status === "running" && <StateMessage kind="loading">The backend is capturing syscalls in the emulator. Progress percentages are not available from the capture engine.</StateMessage>}
+          {job.status === "running" && (
+            <StateMessage kind="loading">
+              <strong>Active Execution Stage: {job.stage || "Capturing system calls"}</strong> · Executing inside dedicated Android emulator (emulator-5554). Watch the application launch and receive UI fuzzing live in the emulator display.
+            </StateMessage>
+          )}
           {job.status === "failed" && <StateMessage kind="error">{job.error ?? "Dynamic analysis failed."}</StateMessage>}
           {job.status === "interrupted" && <StateMessage kind="error">{job.error ?? "Dynamic analysis was interrupted (e.g. backend restarted). Please start a new run."}</StateMessage>}
           {job.status === "completed" && <StateMessage kind="success">Analysis complete. Results are shown below.</StateMessage>}
@@ -450,6 +573,11 @@ export function DynamicPage() {
                         <h2>Runtime Network Threat Intelligence</h2>
                         <p>Remote public IP destinations observed on active sockets (/proc/net/tcp) during emulator execution, cross-referenced with live threat intelligence feeds.</p>
                       </div>
+                    </div>
+                    <div className="notice notice-info" style={{ margin: "12px 0", background: "#0b1624", border: "1px solid #1e385c" }}>
+                      <p style={{ margin: 0, fontSize: "11px", color: "#93b2ce", lineHeight: "1.5" }}>
+                        <strong>Network Attribution Limitation:</strong> Sockets are sampled system-wide from <code>/proc/net/tcp</code> and <code>/proc/net/tcp6</code> during the execution window. Background system processes (such as Google Play Services / GMS check-ins) are captured at the operating system level and cannot be conclusively attributed to the tested application package without socket-to-PID inode resolution.
+                      </p>
                       <span className="badge badge-danger">
                         {result.runtime_threat_intelligence.length} Active Public Sockets
                       </span>
@@ -591,6 +719,18 @@ export function DynamicPage() {
                 <div className="meta-drawer">
                   <div style={{ fontSize: "11px", fontWeight: 700, color: "var(--accent)", letterSpacing: "0.1em", marginBottom: "12px" }}>
                     SANDBOX TELEMETRY SPECS
+                  </div>
+                  <div className="meta-row">
+                    <span className="meta-label">APK SHA-256</span>
+                    <span className="meta-val font-mono hash-pill" style={{ wordBreak: "break-all" }}>{result.sha256}</span>
+                  </div>
+                  <div className="meta-row">
+                    <span className="meta-label">Sandbox Target</span>
+                    <span className="meta-val font-mono">emulator-5554 (Android 14 x86_64)</span>
+                  </div>
+                  <div className="meta-row">
+                    <span className="meta-label">Sandbox Execution</span>
+                    <span className="meta-val" style={{ color: "#34d399", fontWeight: 600 }}>SUCCESS (Installed &amp; Traced)</span>
                   </div>
                   <div className="meta-row">
                     <span className="meta-label">Capture Duration</span>

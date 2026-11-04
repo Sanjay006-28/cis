@@ -147,6 +147,7 @@ export interface DynamicAccepted {
 export interface DynamicJob {
   job_id: string;
   status: "queued" | "running" | "completed" | "failed" | "interrupted";
+  stage?: string | null;
   filename: string;
   requested_seconds: number;
   created_at: string;

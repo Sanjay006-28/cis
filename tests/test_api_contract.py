@@ -135,8 +135,12 @@ class ApiContractTests(unittest.TestCase):
         from fastapi import UploadFile
         import asyncio
 
-        # Upload a dummy zip/apk
-        content = b"PK\x03\x04" + b"\x00" * 100
+        # Upload a dummy valid zip/apk
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("AndroidManifest.xml", b"<manifest/>")
+        content = buf.getvalue()
         upload_file = UploadFile(filename="test_comparison.apk", file=io.BytesIO(content))
         upload_resp = asyncio.run(upload_apk(upload_file))
 

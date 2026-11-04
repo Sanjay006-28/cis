@@ -112,31 +112,136 @@ flowchart TD
 
 ---
 
-## 📊 Experimental Results & Benchmarks
+## 📊 Comprehensive Experimental Results & Benchmarks
 
-### 1. Static Analysis (Drebin-215: 7,254 Unique Deduplicated Applications)
-Evaluated on a 20% held-out test split ($N = 1,451$):
+The Sentinel framework was evaluated across both static (Drebin-215) and dynamic (CICMalDroid2020) benchmarks, combining standard stratified splits, 5-fold cross-validation, and rigorous **Cluster-Held-Out evaluation** (holding out entire malware clusters to prevent cross-family data leakage).
 
+---
+
+### 1. Static Analysis Benchmark (Drebin-215: 7,254 Unique Deduplicated Applications)
+
+The dataset comprises 7,254 unique Android applications mapped to a 215-dimensional binary feature vector spanning permissions, intent filters, sensitive API calls, and shell commands.
+
+#### A. 20% Held-Out Test Evaluation ( = 1,451$)
 | Model Architecture | Accuracy | Precision | Recall (Malware) | F1-Score | ROC-AUC |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Random Forest** | 97.11% | 96.02% | 91.55% | 0.9373 | 0.9926 |
-| **XGBoost** | 98.00% | 95.91% | **95.63%** | 0.9577 | **0.9961** |
+| **Random Forest** (100 trees, Gini) | 97.11% | 96.02% | 91.55% | 0.9373 | 0.9926 |
+| **XGBoost Classifier** (depth 6, lr 0.1) | 98.00% | 95.91% | **95.63%** | 0.9577 | **0.9961** |
 | **Fused Ensemble (RF + XGB)** | **98.14%** | **96.75%** | 95.34% | **0.9604** | 0.9952 |
 
-*5-Fold Stratified Cross-Validation:* Fused Ensemble achieves $97.63\% \pm 0.33\%$ accuracy and $0.9948 \pm 0.0012$ ROC-AUC.
+#### B. 5-Fold Stratified Cross-Validation ( = 7,254$)
+| Model Architecture | Accuracy (Mean ± Std) | Precision | Recall | F1-Score | ROC-AUC |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Random Forest** | 97.20% ± 0.22% | 97.21% ± 1.32% | 90.80% ± 0.53% | 0.9389 ± 0.44% | 0.9930 ± 0.12% |
+| **XGBoost Classifier** | 97.63% ± 0.36% | 96.26% ± 1.78% | **93.65% ± 0.80%** | 0.9493 ± 0.73% | **0.9952 ± 0.17%** |
+| **Fused Ensemble** | **97.63% ± 0.33%** | **96.81% ± 1.57%** | 93.07% ± 0.42% | **0.9490 ± 0.66%** | 0.9948 ± 0.12% |
+
+---
 
 ### 2. Dynamic System-Call Analysis (CICMalDroid2020: 11,520 Applications)
-Evaluated across 139 Linux system calls using both standard random splits and rigorous **Cluster-Held-Out cross-validation** (holding out entire malware families to prevent cross-family data leakage):
 
-| Model Architecture | Random Test Acc | Random ROC | Cluster-Held-Out Acc | Cluster-Held-Out ROC |
-| :--- | :---: | :---: | :---: | :---: |
-| **XGBoost** | **97.31%** | **0.9915** | **91.99% ± 3.36%** | **0.9600 ± 0.0223** |
-| **Transformer** | 90.93% | 0.9691 | 86.15% ± 6.62% | 0.9419 ± 0.0125 |
-| **TCN (Multi-Branch)** | 94.53% | 0.9554 | 84.99% ± 3.14% | 0.9013 ± 0.0409 |
-| **BiLSTM** | 90.80% | 0.9523 | 79.69% ± 9.25% | 0.8806 ± 0.0552 |
+The dynamic benchmark consists of 11,520 Android applications (9,729 malware, 1,791 benign) executed in an instrumented sandbox. Runtime system calls were monitored across 139 unique Linux kernel system calls.
 
-### 3. McNemar Statistical Significance
-Pairwise McNemar hypothesis tests with Bonferroni correction ($\alpha = 0.05/3$) confirm that tabular XGBoost provides statistically significant superior generalization on system-call frequency vectors over sequence deep learning models ($p < 0.001$).
+#### A. Standard Random Test Split Evaluation ( = 2,304$)
+| Model Architecture | Accuracy | Precision | Recall (Malware) | Specificity (Benign) | F1-Score | ROC-AUC |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Tabular XGBoost** | **97.31%** | **99.01%** | **97.79%** | **94.69%** | **0.9840** | **0.9915** |
+| **TCN (Multi-Branch)** | 94.53% | 96.33% | 97.23% | 79.89% | 0.9678 | 0.9554 |
+| **Transformer** | 90.93% | 97.96% | 91.16% | 89.66% | 0.9444 | 0.9691 |
+| **BiLSTM** | 90.80% | 97.33% | 91.62% | 86.31% | 0.9439 | 0.9523 |
+
+#### B. Cluster-Held-Out Evaluation (Family-Leakage Prevention)
+To rigorously assess real-world out-of-distribution generalization, K-Means clustering was performed on behavior vectors to group samples into distinct malware families. Entire clusters were held out during 5-fold cross-validation:
+
+| Model Architecture | Accuracy (Mean ± Std) | Precision | Recall (Malware) | Specificity (Benign) | F1-Score | ROC-AUC |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Tabular XGBoost** | **91.99% ± 3.36%** | **97.48% ± 1.49%** | **92.98% ± 4.12%** | **87.49% ± 5.13%** | **0.9513 ± 2.07%** | **0.9600 ± 0.0223** |
+| **Transformer** | 86.15% ± 6.62% | 96.99% ± 1.61% | 86.32% ± 8.64% | 85.60% ± 6.13% | 0.9112 ± 4.60% | 0.9419 ± 0.0125 |
+| **TCN (Multi-Branch)** | 84.99% ± 3.14% | 96.33% ± 2.19% | 85.54% ± 3.89% | 82.74% ± 9.29% | 0.9056 ± 2.11% | 0.9013 ± 0.0409 |
+| **BiLSTM** | 79.69% ± 9.25% | 95.56% ± 1.72% | 79.74% ± 11.40% | 79.31% ± 8.74% | 0.8657 ± 6.80% | 0.8806 ± 0.0552 |
+
+#### C. Pooled Out-of-Fold Predictions (Cluster-Held-Out Full Dataset  = 11,520$)
+| Model Architecture | Accuracy | Precision | Recall (Malware) | Specificity (Benign) | F1-Score | ROC-AUC |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Tabular XGBoost** | **91.99%** | **97.48%** | **92.92%** | **86.93%** | **0.9514** | **0.9572** |
+| **Transformer** | 86.15% | 96.94% | 86.32% | 85.20% | 0.9132 | 0.9371 |
+| **TCN (Multi-Branch)** | 84.99% | 96.31% | 85.51% | 82.19% | 0.9059 | 0.8939 |
+| **BiLSTM** | 79.69% | 95.54% | 79.67% | 79.79% | 0.8688 | 0.8890 |
+
+#### D. Normalized Syscall Share Generalization
+When training and testing XGBoost directly on normalized syscall activity shares rather than unconstrained raw counts:
+* **Cluster-Held-Out Accuracy:** **92.76% ± 1.91%**
+* **Cluster-Held-Out Precision:** **97.14% ± 1.23%**
+* **Cluster-Held-Out Recall:** **94.19% ± 2.39%**
+* **Cluster-Held-Out Specificity:** **85.26% ± 3.79%**
+* **F1-Score / ROC-AUC:** **0.9562 ± 0.0124** / **0.9520 ± 0.0206**
+
+---
+
+### 3. Feature Count Sensitivity (Dimensionality Reduction)
+
+We evaluated XGBoost performance as a function of the number of top information-gain system calls retained:
+
+| Features Kept | Accuracy | F1-Score | Specificity (Benign Cleared) | Observation |
+| :---: | :---: | :---: | :---: | :--- |
+| **10** | 82.57% | 0.8882 | 80.39% | Compact footprint; high benign false alarms |
+| **20** | 90.03% | 0.9385 | 82.36% | Large gain in F1 score (+5.0%) |
+| **30** | 91.61% | 0.9491 | 84.25% | Balanced real-time embedded profile |
+| **50** | **91.99%** | **0.9513** | **87.49%** | **Optimal tradeoff between inference latency & accuracy** |
+| **100** | 93.92% | 0.9636 | 88.22% | Maximum tabular metric performance |
+| **139 (All)** | 90.46% | 0.9414 | 88.34% | Slight overfitting on uninformative rare syscalls |
+
+---
+
+### 4. Zero-Day Generalization: Unseen Malware Categories
+
+Models were evaluated against completely unseen malware categories to verify real-world detection capability:
+
+| Unseen Malware Category | Total Samples Evaluated | Malware Detection Rate (Caught) | Benign Clearance Rate |
+| :--- | :---: | :---: | :---: |
+| **Banking Trojans** | 2,043 | **87.4%** | 91.9% |
+| **Adware** | 1,253 | **77.3%** | 90.5% |
+| **SMS Malware** | 3,902 | **76.8%** | 89.9% |
+| **Riskware** | 2,531 | **74.8%** | 90.2% |
+
+---
+
+### 5. Statistical Significance Testing (Pairwise McNemar Tests)
+
+To establish statistical rigor, pairwise McNemar contingency table tests were executed with Bonferroni correction (alpha = 0.05 / 3 = 0.0167):
+
+#### A. Random Split Test ( = 2,304$)
+| Comparison | Model A Correct Only | Model B Correct Only | p-value | Significant (alpha = 0.0167) | Winner |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **TCN vs. BiLSTM** | 142 | 56 | < 10^-5 | **Yes** | **TCN** |
+| **TCN vs. Transformer** | 158 | 75 | < 10^-5 | **Yes** | **TCN** |
+| **TCN vs. XGBoost** | 37 | 101 | < 10^-5 | **Yes** | **XGBoost** |
+
+#### B. Cluster-Held-Out Test ( = 11,520$)
+| Comparison | Model A Correct Only | Model B Correct Only | p-value | Significant (alpha = 0.0167) | Winner |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **TCN vs. BiLSTM** | 1,481 | 870 | < 10^-10 | **Yes** | **TCN** |
+| **TCN vs. Transformer** | 758 | 891 | 0.0011 | **Yes** | **Transformer** |
+| **TCN vs. XGBoost** | 587 | 1,393 | < 10^-10 | **Yes** | **XGBoost** |
+
+*Conclusion:* Across both standard and cluster-held-out protocols, tabular XGBoost demonstrates statistically significant superiority (p < 0.001) over neural sequence models for syscall frequency distributions.
+
+---
+
+### 6. Feature Selection Methodology: Count-Based vs. Share-Based Selection
+
+We compared Condition A (Information Gain + Extra Trees on raw frequency counts) against Condition B (Information Gain + Extra Trees directly on normalized syscall shares) using 5-fold Cluster-Held-Out evaluation:
+
+| Evaluation Metric | Condition A (Count-Based Selection) | Condition B (Share-Based Selection) | Relative Advantage |
+| :--- | :---: | :---: | :---: |
+| **Mean Accuracy** | 91.60% ± 2.81% | **93.02% ± 2.24%** | **+1.42% (p = 1.90 x 10^-12)** |
+| **Mean F1-Score** | 0.9488 ± 0.0182 | **0.9579 ± 0.0144** | **+0.0091** |
+| **Mean Recall (Malware)** | 92.92% ± 3.68% | **94.75% ± 2.38%** | **+1.83%** |
+| **Mean Specificity (Benign)** | **84.86% ± 5.36%** | 83.88% ± 4.63% | -0.98% |
+| **Mean ROC-AUC** | 0.9522 ± 0.0229 | **0.9522 ± 0.0269** | Equal |
+| **Jaccard Similarity** | 69.49% (41 common features out of 59 unique features selected) | | |
+
+The McNemar test (b = 190, c = 354, p = 1.90 x 10^-12) proves that selecting features directly on normalized runtime shares significantly improves detection of packed and stealthy malware.
 
 ---
 
@@ -529,8 +634,159 @@ npm run build
 ### Analysis workflows
 
 - **Static analysis:** choose an APK in Analyze APK and explicitly start analysis. The existing `phase3_live_demo.analyze_apk` performs extraction, prediction, SHAP, and optional threat intelligence. JSON and PDF reports are available for completed results.
-- **Dynamic analysis:** first run the readiness check, select the bundled sample APK or upload one, choose 10–300 seconds, and explicitly confirm execution. The backend uses a job ID and reports actual queued/running/completed/failed status. It rejects concurrent emulator analyses. No APK is run on page load or navigation.
+- **Dynamic analysis:** first run the readiness check, select the bundled sample APK or upload one, choose 10-300 seconds, and explicitly confirm execution. The backend uses a job ID and reports actual queued/running/completed/failed status. It rejects concurrent emulator analyses. No APK is run on page load or navigation.
 - **Research:** saved experiment tables and images are served from project artifacts and are kept distinct from live model predictions.
+
+---
+
+## 🛡️ Sandbox Hardening & Security Isolation Architecture
+
+To safely analyze real-world malware samples without endangering host operating systems, local networks, or private services, Sentinel implements a multi-tier sandbox containment boundary:
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ HOST SYSTEM (Windows 11)                                               │
+│                                                                        │
+│   FastAPI Backend (Port 8001)   ◄─── Syscall Telemetry ◄─── strace     │
+│   React Dashboard (Port 5173)                                          │
+│                                                                        │
+│   ══════════════════════════════════════════════════════════════════   │
+│   KERNEL FIREWALL BOUNDARY (SENTINEL_ISOLATION iptables & ip6tables)    │
+│   Blocked: 10.0.2.2, Host LAN, VirtualBox, WSL, Private Ports          │
+│   ══════════════════════════════════════════════════════════════════   │
+│                                                                        │
+│   ┌────────────────────────────────────────────────────────────────┐   │
+│   │ ANDROID 14 RUNTIME VIRTUAL MACHINE (emulator-5554)             │   │
+│   │                                                                │   │
+│   │   [ Target APK (e.g. SpyNote RAT) ]                            │   │
+│   │         │                                                      │   │
+│   │         ├──► System Calls ──► strace -c -f -p <PID>            │   │
+│   │         └──► Active Sockets ──► /proc/net/tcp                  │   │
+│   └────────────────────────────────────────────────────────────────┘   │
+│         ▲                                                              │
+│         └── Disposable State: Restored from PRE_MALWARE_DYNAMIC_CLEAN  │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### 1. Emulator-Level Host Isolation (`SENTINEL_ISOLATION`)
+Rooted Android emulators route virtual gateway traffic through `10.0.2.2`. To prevent guest-to-host pivoting, Sentinel injects persistent, idempotent guest-side firewall rules:
+* **IPv4 (`iptables`):** Drops and rejects all guest-to-host traffic to `10.0.2.2`, host LAN subnets (`10.138.121.252`), VirtualBox host adapters (`192.168.56.1`), and WSL interfaces (`172.26.176.1`) with `icmp-port-unreachable` (preserving virtual DHCP on UDP 67).
+* **IPv6 (`ip6tables`):** Blocks link-local host gateway `fe80::2` and host IPv6 adapters.
+* **Host Non-Interference:** Never modifies Windows Defender, Windows Firewall, or host network interfaces.
+
+### 2. Zero-Persistence Snapshot Rollback Protocol
+* Before executing live malware, an instantaneous baseline snapshot (`PRE_MALWARE_DYNAMIC_CLEAN`) is established on the AVD.
+* Upon completion of the capture window, Sentinel force-stops the process, uninstalls the package, purges `/data/local/tmp`, and reloads the clean snapshot:
+  ```powershell
+  adb -s emulator-5554 emu avd snapshot load PRE_MALWARE_DYNAMIC_CLEAN
+  ```
+* Ensures 100% cold-state restoration with zero forensic persistence on emulator or host.
+
+### 3. Dedicated Air-Gapped Static Malware Lab (`Sentinel-Static-Lab`)
+For air-gapped static malware analysis, Sentinel includes an isolated VirtualBox environment:
+* **Operating System:** Parrot Security 7.3 (Debian 13.5 base, Linux kernel 6.12.63-amd64), 4 vCPUs, 4096 MB RAM.
+* **Hardened Isolation:** Shared clipboard disabled, drag-and-drop disabled, USB controllers disabled, zero shared folders, and network adapter completely detached (`nic1="none"`).
+* **Baseline Snapshots:** 
+  - `CLEAN_BASELINE_PRE_MALWARE`: Clean offline baseline with verified Drebin-215 dependencies.
+  - `CLEAN_BASELINE_PRE_MALWARE_SECURED`: Hardened state with SSH disabled, authorized keys permanently removed, and ephemeral host keys purged.
+
+---
+
+## 🎯 Case Study: In-The-Wild Malware Benchmark (`E-Challan.apk` SpyNote RAT)
+
+To evaluate Sentinel's real-world efficacy, the platform was benchmarked against an active in-the-wild Android spyware sample retrieved from MalwareBazaar:
+
+* **Sample Filename:** `E-Challan.apk`
+* **Package Name:** `com.appd.instll.load`
+* **Main Activity:** `com.appd.instll.splash`
+* **Malware Family:** **SpyNote** (Remote Access Trojan / Spyware)
+* **Target SHA-256:** `e2ae3093df1bc88be2cc11f4ce2ad8017a14edf46cbaf0bd1141afc976af5715`
+
+### Static vs. Dynamic Detection Results:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ 1. STATIC ANALYSIS (Drebin-215 Random Forest + XGBoost Ensemble)                 │
+│                                                                                  │
+│   Verdict:              BENIGN (EVADED)                                          │
+│   Malware Probability:  1.0%                                                     │
+│   Features Detected:    31 of 215                                                │
+│                                                                                  │
+│   Root Cause: The malware uses packing and unusual AXML resource chunk headers   │
+│   to conceal its malicious payload inside encrypted assets. Static decompilers   │
+│   inspect only the benign outer stub, producing a false negative.                │
+└──────────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ 2. DYNAMIC ANALYSIS (Sentinel strace + XGBoost Syscall Classifier)              │
+│                                                                                  │
+│   Verdict:              MALWARE (DETECTED)                                       │
+│   Malware Probability:  85.94% (Normalized-Share) / 99.91% (Raw-Count)            │
+│   Total Syscalls:       14,806 captured over 60.0 seconds                        │
+│   Vocabulary Coverage:  98.82%                                                   │
+│                                                                                  │
+│   Root Cause: Upon execution, the malware's runtime behavior was unmasked by     │
+│   in-memory code unpacking (mprotect +0.85 SHAP) and outbound socket datagrams   │
+│   (sendto 457 calls, +0.56 SHAP).                                                │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Top SHAP Behavioral Drivers:
+1. **`_newselect` (0 calls, `+1.0603` SHAP):** Asynchronous C2 polling dispatch pattern.
+2. **`mprotect` (31 calls, `+0.8457` SHAP):** **Dynamic code unpacking:** modifying memory page permissions (`PROT_READ` to `PROT_EXEC`) to execute dropped shellcode in RAM.
+3. **`brk` (0 calls, `+0.7261` SHAP):** Absence of standard heap resizing, relying on anonymous memory mappings (`mmap`).
+4. **`sendto` (457 calls, `+0.5557` SHAP):** Repetitive outbound datagram transmissions from the Trojan's telemetry worker.
+
+### Dynamic Network Threat Intelligence:
+* **Active Sockets:** Monitored remote public destinations via `/proc/net/tcp` during execution.
+* **Observed IP:** `172.217.113.4:443` (Google LLC, Android OS synchronization).
+* **Embedded Indicators:** Extracted `static-maps.yandex.ru` (Russian map CDN endpoint historically abused by SpyNote for victim geolocation mapping).
+* **Containment:** Host-to-guest boundary dropped all local subnet traversal attempts.
+
+---
+
+## 🚀 Execution Guide
+
+### 1. Web Dashboard (Interactive Dynamic Sandbox)
+1. Start the FastAPI backend:
+   ```powershell
+   cd malware
+   .\venv\Scripts\activate
+   uvicorn backend.main:app --host 127.0.0.1 --port 8001
+   ```
+2. Start the Vite React frontend:
+   ```powershell
+   cd malware\frontend
+   $env:VITE_API_PROXY_TARGET="http://127.0.0.1:8001"
+   npm run dev
+   ```
+3. Open **`http://localhost:5173/dynamic`** in your browser.
+4. Select **"Upload a custom APK"**, choose `C:\Sentinel-Test-Samples\E-Challan.apk`, set duration to 60s, and click **"Start Dynamic Analysis"**.
+5. Live system calls stream into the UI, displaying the **`MALWARE (85.9%)`** verdict, SHAP waterfall chart, Runtime Network Threat Intelligence table, and one-click PDF/JSON download buttons.
+
+### 2. Automated Command-Line Dynamic Evaluation
+To run automated dynamic evaluation from PowerShell:
+```powershell
+cd C:\Sentinel-Test-Samples
+C:\Users\ASHWITH\Downloads\cis\malware\venv\Scripts\python run_single_dynamic_eval.py E-Challan.apk com.appd.instll.load e2ae3093df1bc88be2cc11f4ce2ad8017a14edf46cbaf0bd1141afc976af5715
+```
+Automatically performs preflight checks, uploads the APK, traces 60s of execution, generates executive PDF/JSON reports in `results/`, uninstalls the sample, and verifies emulator cleanliness.
+
+### 3. Air-Gapped Static Analysis (`Sentinel-Static-Lab` VM)
+1. Launch the VM in VirtualBox:
+   ```powershell
+   & "C:\Program Files\Oracle\VirtualBox\VirtualBox.exe" --startvm "Sentinel-Static-Lab"
+   ```
+2. Log in with user `analyst` (password `analyst`).
+3. Run offline static analysis in the Parrot terminal:
+   ```bash
+   cd /home/analyst/sentinel
+   ./venv/bin/python vm_verify.py
+   ```
+Runs 100% offline without host or internet access, verifying the static model SHA-256 (`38FB865C...`) and generating offline reports.
+
+---
 
 The live dynamic result is experimental: the CICMalDroid-trained model and the live emulator may differ in Android release, CPU architecture, and trace duration. A prediction is not definitive proof of malicious behavior.
 

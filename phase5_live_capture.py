@@ -252,6 +252,8 @@ def has_launcher_activity(apk_path):
     try:
         from androguard.core.apk import APK
         apk = APK(apk_path)
+        if apk.get_main_activities():
+            return True
         for act in apk.get_activities():
             filters = apk.get_intent_filters("activity", act)
             actions = filters.get("action", [])
@@ -263,7 +265,7 @@ def has_launcher_activity(apk_path):
         return True
 
 
-def capture_syscalls(apk_path, seconds=60, uninstall=True, device=None, throttle_ms=300, verbose=True):
+def capture_syscalls(apk_path, seconds=60, uninstall=True, device=None, throttle_ms=300, verbose=True, on_stage=None):
     """Install + run the app on the emulator, simulate user input, and count its system calls."""
     say = print if verbose else (lambda *a, **k: None)
     devs = list_devices()
@@ -278,6 +280,14 @@ def capture_syscalls(apk_path, seconds=60, uninstall=True, device=None, throttle
     if not strace:
         raise RuntimeError("strace was not found on the emulator. Run check_setup() and follow its instructions.")
 
+    # Verify that guest-level host isolation rules are active before installing or launching
+    code, iso_out, _ = sh("iptables -L SENTINEL_ISOLATION -n 2>/dev/null", device=device)
+    if code != 0 or "REJECT" not in iso_out:
+        raise RuntimeError(
+            "Host isolation check failed: SENTINEL_ISOLATION chain is missing or incomplete on the emulator. "
+            "Execute apply_guest_isolation.ps1 before launching dynamic capture to prevent guest-to-host lateral traversal."
+        )
+
     # Normalize APK path for ADB so Windows adb.exe (common in WSL setups) can resolve it
     install_path = apk_path
     try:
@@ -291,6 +301,7 @@ def capture_syscalls(apk_path, seconds=60, uninstall=True, device=None, throttle
     except Exception:
         pass
 
+    if on_stage: on_stage("Installing")
     say(f"[1/5] installing {pkg} ...")
     if not has_launcher_activity(apk_path):
         raise RuntimeError(
@@ -302,6 +313,7 @@ def capture_syscalls(apk_path, seconds=60, uninstall=True, device=None, throttle
         raise RuntimeError(f"Install failed: {(out + ' ' + err)[:300]}")
     procs = []
     try:
+        if on_stage: on_stage("Launching")
         say("[2/5] launching the app ...")
         sh(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1", device=device)
         pid = ""
@@ -314,6 +326,7 @@ def capture_syscalls(apk_path, seconds=60, uninstall=True, device=None, throttle
         if not pid:
             raise RuntimeError("The app did not start (no process found). It may have crashed or needs a newer Android version.")
 
+        if on_stage: on_stage("Capturing")
         say(f"[3/5] tracing system calls of process {pid} for {seconds} s while simulating taps ...")
         sh(f"rm -f {REMOTE_OUT}", device=device)
         p_strace = subprocess.Popen(_adb_cmd(["shell", f"{strace} -c -f -p {pid} -o {REMOTE_OUT}"], device),
@@ -440,8 +453,9 @@ def report(result, mapped, coverage, unmapped, pred):
     print(line)
 
 
-def analyze_dynamic(apk_path, seconds=60, bundle_path=BUNDLE_PATH, uninstall=True, device=None, verbose=True):
-    res = capture_syscalls(apk_path, seconds=seconds, uninstall=uninstall, device=device, verbose=verbose)
+def analyze_dynamic(apk_path, seconds=60, bundle_path=BUNDLE_PATH, uninstall=True, device=None, verbose=True, on_stage=None):
+    res = capture_syscalls(apk_path, seconds=seconds, uninstall=uninstall, device=device, verbose=verbose, on_stage=on_stage)
+    if on_stage: on_stage("Analysing")
     return analyze_counts(res, bundle_path, verbose)
 
 

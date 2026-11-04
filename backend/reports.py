@@ -606,7 +606,7 @@ def build_dynamic_pdf_report(
         figure = plt.figure(figsize=(8.5, 11), dpi=140)
         figure.text(0.5, 0.96, "DYNAMIC RUNTIME SECURITY REPORT", ha="center",
                     fontsize=17, fontweight="bold")
-        figure.text(0.5, 0.935, "Live Syscall Emulation ? CICMalDroid2020 XGBoost (Normalized Shares)",
+        figure.text(0.5, 0.935, "Live Syscall Emulation | CICMalDroid2020 XGBoost (Normalized Shares)",
                     ha="center", fontsize=9.5, color="#536273")
 
         is_malware = verdict == "MALWARE"
@@ -627,6 +627,8 @@ def build_dynamic_pdf_report(
             fontsize=9, color=text_color, ha="center", va="center"
         )
 
+        runtime_ti = dynamic_result.get("runtime_threat_intelligence", [])
+        net_summary = f"{len(runtime_ti)} remote destination(s) observed (/proc/net/tcp)" if runtime_ti else "None detected (closed guest boundary)"
         figure.text(
             0.08, 0.79,
             "\n".join((
@@ -636,10 +638,11 @@ def build_dynamic_pdf_report(
                 f"System Calls:       {syscall_count:,} total counted",
                 f"Vocabulary Coverage:{coverage:.1%} of model vocabulary observed",
                 f"Features Seen:      {dynamic_result.get('features_seen', 0)} of 139 training syscalls",
+                f"Network Telemetry:  {net_summary}",
                 f"Analysis Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
                 f"Classifier:         Dynamic XGBoost (Normalized Syscall Shares on CICMalDroid2020)",
             )),
-            family="monospace", fontsize=8.5, va="top", linespacing=1.6,
+            family="monospace", fontsize=8.2, va="top", linespacing=1.5,
         )
 
         if evidence:
@@ -667,35 +670,59 @@ def build_dynamic_pdf_report(
         pdf.savefig(figure, bbox_inches="tight")
         plt.close(figure)
 
-        # Page 2: System call coverage and unmapped calls
-        lines2 = [
-            f"Trace Coverage: {coverage:.1%} of CICMalDroid2020 vocabulary observed ({dynamic_result.get('features_seen', 0)} mapped features)",
-            f"Total System Call Invocations: {syscall_count:,}",
-            f"Unmapped System Call Types: {len(unmapped)}",
-            "",
-            "Analysis Limitations & Capture Boundary:",
-            "  ? Tracing attached after process launch; startup & library init syscalls may be missed.",
-            "  ? CICMalDroid2020 was trained on 32-bit ARM Android; x86_64 emulator syscall frequencies differ.",
-            "  ? Automated Monkey UI events are pseudo-random and may not trigger evasive execution paths.",
-            "  ? High-frequency system calls (e.g. mprotect, socket) occur in benign JIT and networking operations.",
-            "",
-        ]
+        # Page 2: Runtime Network Threat Intelligence & Trace Coverage
+        lines2 = []
         runtime_ti = dynamic_result.get("runtime_threat_intelligence", [])
         if runtime_ti:
-            lines2.extend(["Runtime Network Threat Intelligence (Live Socket Destinations):"])
+            lines2.extend([
+                "=" * 82,
+                "RUNTIME NETWORK THREAT INTELLIGENCE (Observed Sockets & Live Feeds)",
+                "=" * 82,
+                f"Active Remote Public Sockets Sampled: {len(runtime_ti)}",
+                "Remote public IP destinations observed on active sockets (/proc/net/tcp)",
+                "during emulator execution, cross-referenced with AbuseIPDB threat feeds:",
+                "",
+                f"{'Destination IP':<18} {'Port':<6} {'Country':<9} {'Abuse Score':<18} {'ISP / Organization'}",
+                "-" * 82,
+            ])
             for entry in runtime_ti[:12]:
-                ip = entry.get("ip")
-                port = entry.get("port")
-                score = entry.get("abuse_score", 0)
-                isp = entry.get("isp") or "Unknown ISP"
-                country = entry.get("country") or "??"
-                lines2.append(f"  * {ip}:{port} | AbuseScore: {score}% | Country: {country} | {isp[:30]}")
-            lines2.append("")
+                ip = str(entry.get("ip", "?"))
+                port = str(entry.get("port", "?"))
+                score = f"{entry.get('abuse_score', 0)}% ({entry.get('total_reports', 0)} reports)"
+                isp = str(entry.get("isp") or "Unknown ISP")[:26]
+                country = str(entry.get("country") or "??")
+                lines2.append(f"{ip:<18} {port:<6} {country:<9} {score:<18} {isp}")
+            lines2.extend(["-" * 82, ""])
+        else:
+            lines2.extend([
+                "=" * 82,
+                "RUNTIME NETWORK THREAT INTELLIGENCE",
+                "=" * 82,
+                "No outbound public network sockets were observed during the execution window.",
+                ""
+            ])
+
+        lines2.extend([
+            "=" * 82,
+            "SYSTEM CALL VOCABULARY COVERAGE & EXECUTION METRICS",
+            "=" * 82,
+            f"Trace Coverage:                {coverage:.1%} of CICMalDroid2020 vocabulary observed",
+            f"Model Features Active:         {dynamic_result.get('features_seen', 0)} of 139 training syscalls",
+            f"Total System Call Invocations: {syscall_count:,}",
+            f"Unmapped System Call Types:    {len(unmapped)}",
+            "",
+            "Analysis Limitations & Capture Boundary:",
+            "  * Tracing attached after process launch; startup & library init syscalls may be missed.",
+            "  * CICMalDroid2020 was trained on 32-bit ARM Android; x86_64 emulator syscall frequencies differ.",
+            "  * Automated Monkey UI events are pseudo-random and may not trigger evasive execution paths.",
+            "  * High-frequency system calls (e.g. mprotect, socket) occur in benign JIT and networking operations.",
+            "",
+        ])
 
         if unmapped:
             lines2.append("Most Frequent Unmapped System Calls:")
-            for sc, cnt in sorted(unmapped.items(), key=lambda x: -x[1])[:20]:
-                lines2.append(f"  ? {sc:25s} count: {cnt:,}")
+            for sc, cnt in sorted(unmapped.items(), key=lambda x: -x[1])[:15]:
+                lines2.append(f"  * {sc:25s} count: {cnt:,}")
 
         for p_idx, page_lines in enumerate(_paginate_lines(lines2, lines_per_page=32)):
             fig_p2 = plt.figure(figsize=(8.5, 11), dpi=140)

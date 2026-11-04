@@ -283,8 +283,36 @@ _BARE_IP = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3})(?::\d{1,5})?")
 _DOMAIN = re.compile(r"^(?:[a-z0-9-]+\.)+[a-z]{2,}$")
 
 
+# Known X.509 / ASN.1 Object Identifier (OID) prefixes that syntactically collide
+# with 4-octet IPv4 notation in compiled cryptography and certificate libraries
+_ASN1_OID_PREFIXES = (
+    "2.5.",         # ITU-T / ISO X.500 Directory / X.509 (e.g., 2.5.4.* attributes, 2.5.29.* extensions)
+    "1.2.840.",     # ISO Member Body US (e.g., 1.2.840.113549 RSA, 1.2.840.10045)
+    "1.3.6.",       # DoD / Internet (e.g., 1.3.6.1.4.1, 1.3.6.1.5.5.7)
+    "1.3.14.",      # OIW (Open Systems Interconnection)
+    "2.16.840.",    # Joint US (e.g., NIST)
+    "2.23.133.",    # TCG (Trusted Computing Group)
+    "2.23.140.",    # CA/Browser Forum
+    "0.9.2342.",    # UCL / COSINE
+)
+
+
+def is_asn1_oid(candidate: str) -> bool:
+    """Return True if candidate is an ASN.1 / X.509 Object Identifier rather than an IP.
+    Filters out X.500 attributes (2.5.4.*), X.509 extensions (2.5.29.*), and common OID trees,
+    as well as dot-delimited numeric strings with more than 4 integer segments."""
+    cand = candidate.strip().strip("[]")
+    if any(cand.startswith(prefix) for prefix in _ASN1_OID_PREFIXES):
+        return True
+    parts = cand.split(".")
+    if len(parts) > 4 and all(p.isdigit() for p in parts):
+        return True
+    return False
+
+
 def extract_indicators(strings):
     """Find public IPs (IPv4 and IPv6) and domain names embedded in an app's strings.
+    Filters out private, multicast, loopback, reserved addresses, and X.509 ASN.1 OIDs.
     Returns (ips, domains, n_ignored): dicts of indicator -> example string."""
     ips, domains, ignored = {}, {}, 0
     for s in strings:
@@ -294,24 +322,28 @@ def extract_indicators(strings):
         hosts = []
         # Check if bare string is an IP address
         try:
-            bare_parsed = ipaddress.ip_address(s.strip("[]"))
-            if bare_parsed.is_global and not (bare_parsed.is_multicast or bare_parsed.is_private or bare_parsed.is_loopback or bare_parsed.is_reserved):
-                ips.setdefault(str(bare_parsed), s[:90])
-                continue
+            bare_str = s.strip("[]")
+            if not is_asn1_oid(bare_str):
+                bare_parsed = ipaddress.ip_address(bare_str)
+                if bare_parsed.is_global and not (bare_parsed.is_multicast or bare_parsed.is_private or bare_parsed.is_loopback or bare_parsed.is_reserved):
+                    ips.setdefault(str(bare_parsed), s[:90])
+                    continue
         except ValueError:
             pass
 
         m = _BARE_IP.fullmatch(s)
-        if m:
+        if m and not is_asn1_oid(m.group(1)):
             hosts.append(m.group(1))
         hosts += [h.lower() for h in _URL_HOST.findall(s)]
         for h in hosts:
+            if is_asn1_oid(h):
+                continue
             try:
                 ip = ipaddress.ip_address(h.strip("[]"))
             except ValueError:
                 ip = None
             if ip is not None:
-                if ip.is_global and not (ip.is_multicast or ip.is_private or ip.is_loopback or ip.is_reserved):
+                if not is_asn1_oid(str(ip)) and ip.is_global and not (ip.is_multicast or ip.is_private or ip.is_loopback or ip.is_reserved):
                     ips.setdefault(str(ip), s[:90])
                 continue
             if _DOMAIN.match(h):
@@ -348,6 +380,8 @@ def resolve_domain(host, timeout=3.0):
 def check_ip(ip, api_key, max_age_days=90, timeout=15, http_get=None):
     """Ask AbuseIPDB about one IP. `http_get` lets tests inject a fake response."""
     # Pre-validate IP address
+    if is_asn1_oid(ip):
+        raise ValueError(f"AbuseIPDB lookup rejected: '{ip}' is an X.509 / ASN.1 Object Identifier, not a public IP.")
     try:
         parsed_ip = ipaddress.ip_address(ip.strip("[]"))
     except ValueError:

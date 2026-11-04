@@ -131,6 +131,7 @@ class DynamicAnalysisAccepted(BaseModel):
 class DynamicJobStatus(BaseModel):
     job_id: str
     status: Literal["queued", "running", "completed", "failed", "interrupted"]
+    stage: str | None = None
     filename: str
     requested_seconds: int
     created_at: str
