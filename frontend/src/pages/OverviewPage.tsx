@@ -10,9 +10,32 @@ import type { Health } from "../types";
 export function OverviewPage() {
   const [health, setHealth] = useState<Health | null>(null);
   const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(1);
+  const [isRetrying, setIsRetrying] = useState(false);
+
+  const checkConnection = (currAttempt = 1) => {
+    setError("");
+    setAttempt(currAttempt);
+    setIsRetrying(true);
+    getHealth()
+      .then((res) => {
+        setHealth(res);
+        setError("");
+        setIsRetrying(false);
+      })
+      .catch((reason: Error) => {
+        if (currAttempt < 15) {
+          // Backend typically takes 5-8s on Windows to import PyTorch & XGBoost models
+          setTimeout(() => checkConnection(currAttempt + 1), 1500);
+        } else {
+          setError(reason.message);
+          setIsRetrying(false);
+        }
+      });
+  };
 
   useEffect(() => {
-    getHealth().then(setHealth).catch((reason: Error) => setError(reason.message));
+    checkConnection(1);
   }, []);
 
   return (
@@ -22,14 +45,32 @@ export function OverviewPage() {
         title="Android threat analysis"
         description="Inspect APKs with the existing Drebin-215 static pipeline, or explicitly run a dynamic trace on the configured emulator."
       />
-      {error && <StateMessage kind="error">{error}</StateMessage>}
+      {error && (
+        <div style={{ marginBottom: "1rem" }}>
+          <StateMessage kind="error">
+            {error}
+          </StateMessage>
+          <div style={{ marginTop: "0.5rem" }}>
+            <button
+              className="button button-secondary"
+              onClick={() => checkConnection(1)}
+              disabled={isRetrying}
+              style={{ fontSize: "12px", padding: "6px 12px" }}
+            >
+              {isRetrying ? "🔄 Connecting..." : "🔄 Retry Connection"}
+            </button>
+          </div>
+        </div>
+      )}
       {health && (
         <StateMessage kind="success">
           API connected · {health.service}
         </StateMessage>
       )}
       {!health && !error && (
-        <StateMessage kind="loading">Checking API connection…</StateMessage>
+        <StateMessage kind="loading">
+          Connecting to API backend (initializing models, attempt {attempt}/15)…
+        </StateMessage>
       )}
 
       <div className="metric-grid">

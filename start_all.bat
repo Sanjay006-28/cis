@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 
-title Android Malware Detection Platform (All-In-One Launcher)
+title Android Malware Detection - React Web App
 
 :: -------------------------------------------------------------------------------
 :: 1. Navigate to malware root directory
@@ -10,7 +10,7 @@ cd /d "%~dp0"
 set "PROJ_DIR=%CD%"
 
 echo ===============================================================================
-echo       Starting Android Malware Detection Platform (FastAPI + React)
+echo       Starting Android Malware Detection Platform (React + FastAPI)
 echo ===============================================================================
 echo.
 
@@ -86,15 +86,18 @@ echo [3/4] Starting FastAPI backend on http://127.0.0.1:%API_PORT% ...
 start "Android Malware Analysis - Backend API (Port %API_PORT%)" cmd /k "title Backend API (Port %API_PORT%) && cd /d "%PROJ_DIR%" && "%PYTHON_EXE%" -m uvicorn backend.main:app --host 127.0.0.1 --port %API_PORT%"
 set "BACKEND_STARTED_BY_US=1"
 
-:: Wait up to 6 seconds for backend to become responsive
-echo [INFO] Waiting for backend to become ready...
-for /l %%i in (1,1,6) do (
+:: Wait up to 25 seconds for backend to import PyTorch, XGBoost & SHAP models
+echo [INFO] Waiting for backend to initialize models (typically takes 5-8 seconds)...
+for /l %%i in (1,1,25) do (
     "%PYTHON_EXE%" "%PROJ_DIR%\check_service.py" health --port %API_PORT% >nul 2>&1
     if not errorlevel 1 goto :BACKEND_READY_OK
     timeout /t 1 /nobreak >nul 2>&1
 )
+echo [WARN] Backend took longer than expected to bind. Please check the Backend API window.
+goto :CHECK_FRONTEND_STEP
+
 :BACKEND_READY_OK
-echo [INFO] Backend is active on http://127.0.0.1:%API_PORT%
+echo [SUCCESS] Backend is active and healthy on http://127.0.0.1:%API_PORT%
 
 :CHECK_FRONTEND_STEP
 :: Explicitly set Vite proxy target to match active backend port
